@@ -1,0 +1,33 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: pokedex
+      POSTGRES_USER: pokedex
+      POSTGRES_PASSWORD: pokedex
+    ports:
+      - "5432:5432"
+    volumes:
+      - pokedex-js-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pokedex"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  api:
+    build: .
+    environment:
+      NODE_ENV: development
+      PORT: "3000"
+      DATABASE_URL: postgres://pokedex:pokedex@postgres:5432/pokedex
+      POKEAPI_BASE_URL: https://pokeapi.co/api/v2
+      JWT_SECRET: CHANGE_ME__dev-only-secret
+    ports:
+      - "3000:3000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  pokedex-js-pgdata:
