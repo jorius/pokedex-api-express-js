@@ -57,38 +57,85 @@ router.get('/local', PokemonsController.getLocal);
 
 /**
  * @swagger
- * /api/v1/pokemons/{idOrName}:
+ * /api/v1/pokemons/name/{name}:
  *   get:
  *     tags:
  *       - pokemons
- *     summary: US-02 — Detailed view (image, core stats, description, evolution chain)
+ *     summary: US-02 — Detailed view by Pokemon name (image, core stats, description, evolution chain)
  *     parameters:
  *       - in: path
- *         name: idOrName
+ *         name: name
  *         required: true
  *         schema:
  *           type: string
- *         description: PokeAPI id or Pokemon name
+ *         description: Pokemon name
  *     responses:
  *       200:
  *         description: Pokemon detail
  *       404:
  *         description: Pokemon not found
  */
-router.get('/:idOrName', PokemonsController.getDetail);
+router.get('/name/:name', PokemonsController.getDetailByName);
 
 /**
  * @swagger
- * /api/v1/pokemons/{idOrName}/sync:
+ * /api/v1/pokemons/{id}:
+ *   get:
+ *     tags:
+ *       - pokemons
+ *     summary: US-02 — Detailed view by PokeAPI id (image, core stats, description, evolution chain)
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: integer
+ *         description: PokeAPI numeric id
+ *     responses:
+ *       200:
+ *         description: Pokemon detail
+ *       400:
+ *         description: Non-numeric id
+ *       404:
+ *         description: Pokemon not found
+ */
+router.get('/:id', PokemonsController.getDetailById);
+
+/**
+ * @swagger
+ * /api/v1/pokemons/{id}/sync:
  *   post:
  *     tags:
  *       - pokemons
- *     summary: US-03 — Replicate a Pokemon from PokeAPI into the local PostgreSQL store
+ *     summary: US-03 — Replicate a Pokemon (by PokeAPI id) into the local PostgreSQL store
  *     security:
  *       - bearerAuth: []
  *     parameters:
  *       - in: path
- *         name: idOrName
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: integer
+ *     responses:
+ *       201:
+ *         description: Pokemon replicated locally
+ *       404:
+ *         description: Pokemon not found in PokeAPI
+ */
+router.post('/:id/sync', requireAuth, PokemonsController.syncById);
+
+/**
+ * @swagger
+ * /api/v1/pokemons/name/{name}/sync:
+ *   post:
+ *     tags:
+ *       - pokemons
+ *     summary: US-03 — Replicate a Pokemon (by name) into the local PostgreSQL store
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: name
  *         required: true
  *         schema:
  *           type: string
@@ -98,7 +145,7 @@ router.get('/:idOrName', PokemonsController.getDetail);
  *       404:
  *         description: Pokemon not found in PokeAPI
  */
-router.post('/:idOrName/sync', requireAuth, PokemonsController.sync);
+router.post('/name/:name/sync', requireAuth, PokemonsController.syncByName);
 
 /**
  * @swagger

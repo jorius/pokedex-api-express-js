@@ -4,6 +4,8 @@ import { NotImplementedError } from '../utils/errors/NotImplementedError.js';
 /**
  * Business logic for the four Pokemon user stories. Controllers stay thin and
  * delegate here; this layer orchestrates clients/PokeApiClient and models/PokemonsModel.
+ * Lookup by id and lookup by name are separate operations (RESTful: one route
+ * per identifier type); the internal PokeAPI gateway accepts either.
  */
 
 const browse = async (_page, _pageSize) => {
@@ -11,14 +13,24 @@ const browse = async (_page, _pageSize) => {
   throw new NotImplementedError('PokemonsService.browse');
 };
 
-const getDetail = async (_idOrName) => {
-  // TODO US-02: image, core stats, description, evolution chain.
-  throw new NotImplementedError('PokemonsService.getDetail');
+const getDetailById = async (_id) => {
+  // TODO US-02: image, core stats, description, evolution chain — by PokeAPI numeric id.
+  throw new NotImplementedError('PokemonsService.getDetailById');
 };
 
-const sync = async (_idOrName) => {
-  // TODO US-03: fetch from PokeAPI and upsert into PostgreSQL via PokemonsModel.
-  throw new NotImplementedError('PokemonsService.sync');
+const getDetailByName = async (_name) => {
+  // TODO US-02: image, core stats, description, evolution chain — by name.
+  throw new NotImplementedError('PokemonsService.getDetailByName');
+};
+
+const syncById = async (_id) => {
+  // TODO US-03: fetch from PokeAPI by id and upsert into PostgreSQL via PokemonsModel.
+  throw new NotImplementedError('PokemonsService.syncById');
+};
+
+const syncByName = async (_name) => {
+  // TODO US-03: fetch from PokeAPI by name and upsert into PostgreSQL via PokemonsModel.
+  throw new NotImplementedError('PokemonsService.syncByName');
 };
 
 const getLocal = async (_page, _pageSize) => {
@@ -37,5 +49,5 @@ const remove = async (_id) => {
 };
 
 export {
-  browse, getDetail, sync, getLocal, update, remove,
+  browse, getDetailById, getDetailByName, syncById, syncByName, getLocal, update, remove,
 };

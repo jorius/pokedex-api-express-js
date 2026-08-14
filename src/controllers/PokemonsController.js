@@ -3,10 +3,21 @@ import * as PokemonsService from '../services/PokemonsService.js';
 
 // utils
 import { ok } from '../utils/Response.js';
+import { ValidationError } from '../utils/errors/ValidationError.js';
 
 /**
  * Thin HTTP layer — no business logic, delegates to PokemonsService.
+ * Lookup by id and lookup by name are separate endpoints (RESTful:
+ * one route per identifier type).
  */
+
+const parseNumericId = (raw) => {
+  const id = Number(raw);
+  if (!Number.isInteger(id) || id <= 0) {
+    throw new ValidationError(`'${raw}' is not a valid numeric id`);
+  }
+  return id;
+};
 
 const browse = async (req, res, next) => {
   try {
@@ -19,17 +30,33 @@ const browse = async (req, res, next) => {
   }
 };
 
-const getDetail = async (req, res, next) => {
+const getDetailById = async (req, res, next) => {
   try {
-    res.json(ok(await PokemonsService.getDetail(req.params.idOrName)));
+    res.json(ok(await PokemonsService.getDetailById(parseNumericId(req.params.id))));
   } catch (error) {
     next(error);
   }
 };
 
-const sync = async (req, res, next) => {
+const getDetailByName = async (req, res, next) => {
   try {
-    res.status(201).json(ok(await PokemonsService.sync(req.params.idOrName)));
+    res.json(ok(await PokemonsService.getDetailByName(req.params.name)));
+  } catch (error) {
+    next(error);
+  }
+};
+
+const syncById = async (req, res, next) => {
+  try {
+    res.status(201).json(ok(await PokemonsService.syncById(parseNumericId(req.params.id))));
+  } catch (error) {
+    next(error);
+  }
+};
+
+const syncByName = async (req, res, next) => {
+  try {
+    res.status(201).json(ok(await PokemonsService.syncByName(req.params.name)));
   } catch (error) {
     next(error);
   }
@@ -64,5 +91,5 @@ const remove = async (req, res, next) => {
 };
 
 export {
-  browse, getDetail, sync, getLocal, update, remove,
+  browse, getDetailById, getDetailByName, syncById, syncByName, getLocal, update, remove,
 };

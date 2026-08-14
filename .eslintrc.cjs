@@ -15,6 +15,8 @@ module.exports = {
     sourceType: 'module',
   },
   rules: {
+    // Jericho formatting standard: max line length 180 (airbnb defaults to 100)
+    'max-len': ['error', { code: 180 }],
     eqeqeq: ['error', 'always'],
     'prefer-const': 'error',
     'no-var': 'error',
