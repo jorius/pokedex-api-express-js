@@ -1,8 +1,8 @@
 // config
-import { env } from './config/Env.js';
+import { env } from './infrastructure/config/Env.js';
 
 // app
-import { createApp } from './App.js';
+import { createApp } from './presentation/App.js';
 
 const app = createApp();
 

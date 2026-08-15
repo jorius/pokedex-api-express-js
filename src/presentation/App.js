@@ -3,8 +3,8 @@ import express from 'express';
 import swaggerUi from 'swagger-ui-express';
 
 // config
-import { env } from './config/Env.js';
-import { swaggerSpec } from './config/Swagger.js';
+import { env } from '../infrastructure/config/Env.js';
+import { swaggerSpec } from './swagger/Swagger.js';
 
 // routes
 import authRoutes from './routes/AuthRoutes.js';

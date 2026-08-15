@@ -1,5 +1,5 @@
 // services
-import * as AuthService from '../services/AuthService.js';
+import * as AuthService from '../../application/services/AuthService.js';
 
 // utils
 import { ok } from '../utils/Response.js';

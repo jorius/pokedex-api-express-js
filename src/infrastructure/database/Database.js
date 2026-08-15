@@ -2,7 +2,7 @@
 import pg from 'pg';
 
 // config
-import { env } from './Env.js';
+import { env } from '../config/Env.js';
 
 const pool = new pg.Pool({
   connectionString: env.databaseUrl,

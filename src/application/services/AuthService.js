@@ -1,8 +1,8 @@
-// utils
-import { NotImplementedError } from '../utils/errors/NotImplementedError.js';
+// errors
+import { NotImplementedError } from '../../domain/errors/NotImplementedError.js';
 
 /**
- * User registration and authentication (JWT issuance) via models/UsersModel.
+ * User registration and authentication (JWT issuance) via a Drizzle users repository (added in a later task).
  */
 
 const register = async (_payload) => {

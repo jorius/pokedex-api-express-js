@@ -1,9 +1,9 @@
-// utils
-import { NotImplementedError } from '../utils/errors/NotImplementedError.js';
+// errors
+import { NotImplementedError } from '../../domain/errors/NotImplementedError.js';
 
 /**
  * Gateway to the external PokeAPI (https://pokeapi.co/docs/v2), using native fetch
- * against config/Env.js's pokeApiBaseUrl.
+ * against infrastructure/config/Env.js's pokeApiBaseUrl.
  * PokeAPI itself accepts either an id or a name in the same path segment, so this
  * internal gateway keeps a single detail method; the REST surface exposes separate endpoints.
  * Nice to have: cache responses (in-memory with TTL) before hitting the network.

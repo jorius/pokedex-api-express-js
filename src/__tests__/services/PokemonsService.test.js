@@ -1,5 +1,5 @@
 // services
-import * as PokemonsService from '../../services/PokemonsService.js';
+import * as PokemonsService from '../../application/services/PokemonsService.js';
 
 /**
  * Scaffolding only — drive the implementation with TDD:

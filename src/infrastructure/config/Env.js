@@ -35,6 +35,7 @@ const positiveIntegerFields = [
  * signing weak tokens or booting with a nonsensical config. Not called at
  * import time — env is imported freely by tests with no JWT_SECRET set —
  * Server.js calls this once at boot.
+ * @param {typeof env} candidate
  */
 const validateEnv = (candidate) => {
   if (candidate.jwtSecret.length < 32) {

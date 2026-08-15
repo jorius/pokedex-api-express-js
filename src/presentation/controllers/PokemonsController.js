@@ -1,9 +1,9 @@
 // services
-import * as PokemonsService from '../services/PokemonsService.js';
+import * as PokemonsService from '../../application/services/PokemonsService.js';
 
 // utils
 import { ok } from '../utils/Response.js';
-import { ValidationError } from '../utils/errors/ValidationError.js';
+import { ValidationError } from '../../domain/errors/ValidationError.js';
 
 /**
  * Thin HTTP layer — no business logic, delegates to PokemonsService.

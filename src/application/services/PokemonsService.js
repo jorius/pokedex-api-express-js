@@ -1,9 +1,10 @@
-// utils
-import { NotImplementedError } from '../utils/errors/NotImplementedError.js';
+// errors
+import { NotImplementedError } from '../../domain/errors/NotImplementedError.js';
 
 /**
  * Business logic for the four Pokemon user stories. Controllers stay thin and
- * delegate here; this layer orchestrates clients/PokeApiClient and models/PokemonsModel.
+ * delegate here; this layer orchestrates infrastructure/clients/PokeApiClient and
+ * (from a later task) the Drizzle pokemons repository.
  * Lookup by id and lookup by name are separate operations (RESTful: one route
  * per identifier type); the internal PokeAPI gateway accepts either.
  */
