@@ -1,11 +1,12 @@
+// utils
+import { HttpError } from './HttpError.js';
+
 /**
  * Scaffolding marker — thrown by stubs until the real logic is implemented (TDD).
  */
-class NotImplementedError extends Error {
+class NotImplementedError extends HttpError {
   constructor(feature) {
-    super(`${feature} is not implemented yet`);
-    this.name = 'NotImplementedError';
-    this.status = 501;
+    super(`${feature} is not implemented yet`, 501);
   }
 }
 

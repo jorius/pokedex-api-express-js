@@ -1,11 +1,12 @@
+// utils
+import { HttpError } from './HttpError.js';
+
 /**
  * Translated to HTTP 400 by the error handler middleware.
  */
-class ValidationError extends Error {
+class ValidationError extends HttpError {
   constructor(message) {
-    super(message);
-    this.name = 'ValidationError';
-    this.status = 400;
+    super(message, 400);
   }
 }
 

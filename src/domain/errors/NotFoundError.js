@@ -1,11 +1,12 @@
+// utils
+import { HttpError } from './HttpError.js';
+
 /**
  * Translated to HTTP 404 by the error handler middleware.
  */
-class NotFoundError extends Error {
+class NotFoundError extends HttpError {
   constructor(resource, key) {
-    super(`${resource} with key '${key}' was not found`);
-    this.name = 'NotFoundError';
-    this.status = 404;
+    super(`${resource} with key '${key}' was not found`, 404);
   }
 }
 
