@@ -140,6 +140,63 @@ const twoItemListBody = {
   ],
 };
 
+/**
+ * Giratina is the canonical form-only species: PokeAPI's /pokemon endpoint is keyed by variety,
+ * and this species has NO variety named plainly `giratina`, so /pokemon/giratina 404s. The default
+ * variety is deliberately NOT first in the list so a test that passes can only have honoured
+ * `is_default` rather than having picked varieties[0] by luck.
+ */
+const giratinaSpecies = {
+  genera: [
+    { genus: 'Renegade Pokémon', language: { name: 'en' } },
+  ],
+  flavor_text_entries: [
+    { flavor_text: 'It was banished for its\nviolence.', language: { name: 'en' } },
+  ],
+  evolution_chain: { url: `${BASE_URL}/evolution-chain/240/` },
+  varieties: [
+    { is_default: false, pokemon: { name: 'giratina-origin' } },
+    { is_default: true, pokemon: { name: 'giratina-altered' } },
+  ],
+};
+
+/** Same species with no variety flagged default — resolution must fall back to varieties[0]. */
+const unflaggedGiratinaSpecies = {
+  ...giratinaSpecies,
+  varieties: [
+    { is_default: false, pokemon: { name: 'giratina-altered' } },
+    { is_default: false, pokemon: { name: 'giratina-origin' } },
+  ],
+};
+
+const giratinaAlteredPokemon = {
+  id: 487,
+  name: 'giratina-altered',
+  weight: 7500,
+  height: 45,
+  sprites: {
+    front_default: 'giratina-sprite.png',
+  },
+  abilities: [
+    { ability: { name: 'pressure' }, is_hidden: false, slot: 1 },
+  ],
+  stats: [
+    { base_stat: 150, stat: { name: 'hp' } },
+  ],
+  types: [
+    { type: { name: 'ghost' } },
+    { type: { name: 'dragon' } },
+  ],
+  species: { url: `${BASE_URL}/pokemon-species/487/` },
+};
+
+const giratinaChain = {
+  chain: {
+    species: { name: 'giratina' },
+    evolves_to: [],
+  },
+};
+
 const jsonResponse = (body) => ({
   ok: true,
   status: 200,
@@ -180,6 +237,20 @@ const createPartialFailureFetch = () => jest.fn(async (url) => {
 const createDetailFailureFetch = () => jest.fn(async (url) => {
   if (url.includes('/pokemon-species/')) return serverErrorResponse();
   if (url.includes('/pokemon/')) return jsonResponse(bulbasaurPokemon);
+  throw new Error(`Unexpected fetch: ${url}`);
+});
+
+/**
+ * A form-only species: /pokemon/giratina 404s, /pokemon-species/giratina resolves, and only the
+ * suffixed variety name is fetchable from /pokemon. The `-altered` route is matched FIRST because
+ * the plain-name route is a prefix of it.
+ */
+const createFormOnlyFetch = (species = giratinaSpecies) => jest.fn(async (url) => {
+  if (url.includes('/pokemon/giratina-altered')) return jsonResponse(giratinaAlteredPokemon);
+  if (url.includes('/pokemon/giratina')) return notFoundResponse();
+  if (url.includes('/pokemon-species/giratina')) return jsonResponse(species);
+  if (url.includes('/pokemon-species/')) return jsonResponse(species);
+  if (url.includes('/evolution-chain/')) return jsonResponse(giratinaChain);
   throw new Error(`Unexpected fetch: ${url}`);
 });
 
@@ -376,5 +447,121 @@ describe('PokeApiClient', () => {
     const detail = await client.getPokemonDetail('eevee');
 
     expect(detail?.evolutionChain).toEqual(['eevee', 'vaporeon', 'jolteon', 'flareon']);
+  });
+
+  it('resolves a form-only species name through its default variety', async () => {
+    const fetchFn = createFormOnlyFetch();
+    const client = createPokeApiClient({
+      baseUrl: BASE_URL,
+      l1: createMemoryCache(),
+      l2: createMemoryCache(),
+      l1TtlSeconds: 300,
+      l2TtlSeconds: 3600,
+      fetchFn,
+    });
+
+    const detail = await client.getPokemonDetail('giratina');
+
+    expect(detail?.pokeApiId).toBe(487);
+    expect(detail?.name).toBe('giratina-altered');
+    expect(detail?.category).toBe('Renegade Pokémon');
+    expect(detail?.description).toBe('It was banished for its violence.');
+    expect(detail?.types).toEqual(['ghost', 'dragon']);
+    expect(detail?.evolutionChain).toEqual(['giratina']);
+  });
+
+  it('falls back to the first variety when the species flags none as default', async () => {
+    const fetchFn = createFormOnlyFetch(unflaggedGiratinaSpecies);
+    const client = createPokeApiClient({
+      baseUrl: BASE_URL,
+      l1: createMemoryCache(),
+      l2: createMemoryCache(),
+      l1TtlSeconds: 300,
+      l2TtlSeconds: 3600,
+      fetchFn,
+    });
+
+    const detail = await client.getPokemonDetail('giratina');
+
+    expect(detail?.name).toBe('giratina-altered');
+  });
+
+  it('spends exactly one extra request on the fallback and reuses the species it already fetched', async () => {
+    const fetchFn = createFormOnlyFetch();
+    const client = createPokeApiClient({
+      baseUrl: BASE_URL,
+      l1: createMemoryCache(),
+      l2: createMemoryCache(),
+      l1TtlSeconds: 300,
+      l2TtlSeconds: 3600,
+      fetchFn,
+    });
+
+    await client.getPokemonDetail('giratina');
+
+    expect(fetchFn.mock.calls.map(([url]) => url)).toEqual([
+      `${BASE_URL}/pokemon/giratina`,
+      `${BASE_URL}/pokemon-species/giratina`,
+      `${BASE_URL}/pokemon/giratina-altered`,
+      `${BASE_URL}/evolution-chain/240/`,
+    ]);
+  });
+
+  it('never probes the species endpoint by name when the pokemon lookup hits directly', async () => {
+    const fetchFn = createRouteFetch();
+    const client = createPokeApiClient({
+      baseUrl: BASE_URL,
+      l1: createMemoryCache(),
+      l2: createMemoryCache(),
+      l1TtlSeconds: 300,
+      l2TtlSeconds: 3600,
+      fetchFn,
+    });
+
+    await client.getPokemonDetail('bulbasaur');
+
+    expect(fetchFn.mock.calls.map(([url]) => url)).toEqual([
+      `${BASE_URL}/pokemon/bulbasaur`,
+      `${BASE_URL}/pokemon-species/1`,
+      `${BASE_URL}/evolution-chain/1/`,
+    ]);
+  });
+
+  it('resolves null when the pokemon and the species lookups both miss', async () => {
+    const fetchFn = jest.fn(async () => notFoundResponse());
+    const client = createPokeApiClient({
+      baseUrl: BASE_URL,
+      l1: createMemoryCache(),
+      l2: createMemoryCache(),
+      l1TtlSeconds: 300,
+      l2TtlSeconds: 3600,
+      fetchFn,
+    });
+
+    const detail = await client.getPokemonDetail('notapokemonxyz');
+
+    expect(detail).toBeNull();
+    expect(fetchFn.mock.calls.length).toBe(2);
+  });
+
+  it('caches a fallback-resolved detail under the requested name', async () => {
+    const fetchFn = createFormOnlyFetch();
+    const l1 = createMemoryCache();
+    const client = createPokeApiClient({
+      baseUrl: BASE_URL,
+      l1,
+      l2: createMemoryCache(),
+      l1TtlSeconds: 300,
+      l2TtlSeconds: 3600,
+      fetchFn,
+    });
+
+    await client.getPokemonDetail('giratina');
+    const callCountAfterFirst = fetchFn.mock.calls.length;
+    const second = await client.getPokemonDetail('giratina');
+
+    expect(second?.name).toBe('giratina-altered');
+    expect(fetchFn.mock.calls.length).toBe(callCountAfterFirst);
+    expect(await l1.get('pokeapi:pokemon:giratina')).not.toBeNull();
   });
 });

@@ -43,6 +43,12 @@ const safeParse = (raw) => {
 
 const isFulfilled = (result) => result.status === 'fulfilled';
 
+/** Picks the species' default variety, tolerating a species whose varieties flag none as default. */
+const pickDefaultVariety = (species) => {
+  const varieties = species.varieties ?? [];
+  return varieties.find((variety) => variety.is_default) ?? varieties[0];
+};
+
 /**
  * Factory for the PokeAPI gateway client.
  *
@@ -137,15 +143,44 @@ const createPokeApiClient = ({
     return result;
   };
 
+  /**
+   * PokeAPI's /pokemon endpoint is keyed by VARIETY, not by species. A species whose forms all
+   * carry a suffix has NO variety named plainly after the species — giratina resolves only as
+   * giratina-altered / giratina-origin — so /pokemon/giratina 404s even though the pokemon exists
+   * (same for deoxys, shaymin, wormadam, darmanitan, basculin, urshifu and friends), and users
+   * naturally search the plain name. On a 404 we therefore retry through /pokemon-species/{name}
+   * and take its DEFAULT variety; if the species 404s too the pokemon genuinely does not exist.
+   *
+   * The fallback costs exactly ONE extra request on the miss path and NONE when the first lookup
+   * succeeds, so numeric-id and exact-variety-name lookups are completely unaffected: the species
+   * body fetched here is returned to the caller and reused for assembly instead of being fetched a
+   * second time by id (a default variety's pokemon.id EQUALS its species id, so it is the very
+   * same resource). A `null` species in the result simply means "not fetched yet, assemble as usual".
+   */
+  const resolvePokemon = async (idOrName) => {
+    const direct = await fetchJson(`${baseUrl}/pokemon/${idOrName}`);
+    if (direct !== null) return { pokemon: direct, species: null };
+
+    const species = await fetchJson(`${baseUrl}/pokemon-species/${idOrName}`);
+    if (species === null) return null;
+
+    const defaultVariety = pickDefaultVariety(species);
+    if (defaultVariety === undefined) return null;
+
+    const pokemon = await fetchJson(`${baseUrl}/pokemon/${defaultVariety.pokemon.name}`);
+    return pokemon !== null ? { pokemon, species } : null;
+  };
+
   const getPokemonDetail = async (idOrName) => {
     const key = `pokeapi:pokemon:${idOrName}`;
     const cached = await readCache(key);
     if (cached !== null) return cached;
 
-    const pokemon = await fetchJson(`${baseUrl}/pokemon/${idOrName}`);
-    if (pokemon === null) return null;
+    const resolved = await resolvePokemon(idOrName);
+    if (resolved === null) return null;
 
-    const species = await fetchJson(`${baseUrl}/pokemon-species/${pokemon.id}`);
+    const { pokemon } = resolved;
+    const species = resolved.species ?? await fetchJson(`${baseUrl}/pokemon-species/${pokemon.id}`);
     const englishGenus = species !== null ? pickEnglish(species.genera) : undefined;
     const englishFlavorText = species !== null ? pickEnglish(species.flavor_text_entries) : undefined;
     const description = englishFlavorText !== undefined ? englishFlavorText.flavor_text.replace(/\s+/g, ' ').trim() : null;
