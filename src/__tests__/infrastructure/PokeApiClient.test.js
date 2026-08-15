@@ -223,6 +223,18 @@ const giratinaOriginPokemon = {
   species: { url: `${BASE_URL}/pokemon-species/487/` },
 };
 
+/**
+ * A browse page whose second entry is a NON-DEFAULT variety — exactly what a page of PokeAPI's
+ * variety-keyed /pokemon list looks like once it reaches the form range.
+ */
+const varietyListBody = {
+  count: 1302,
+  results: [
+    { name: 'bulbasaur', url: `${BASE_URL}/pokemon/1/` },
+    { name: 'giratina-origin', url: `${BASE_URL}/pokemon/10007/` },
+  ],
+};
+
 const jsonResponse = (body) => ({
   ok: true,
   status: 200,
@@ -306,6 +318,31 @@ const createNonDefaultVarietyFetch = () => jest.fn(async (url) => {
   throw new Error(`Unexpected fetch: ${url}`);
 });
 
+/**
+ * A browse page containing a non-default variety. `/pokemon-species/10007` 404s exactly as the
+ * real API does, so a list hydrator that builds the species URL from pokemon.id degrades that
+ * entry to `category: null`, while the species.url route (pokemon-species/487) resolves it.
+ */
+const createVarietyListFetch = () => jest.fn(async (url) => {
+  if (url.includes('/pokemon?')) return jsonResponse(varietyListBody);
+  if (url.includes('/pokemon/giratina-origin')) return jsonResponse(giratinaOriginPokemon);
+  if (url.includes('/pokemon/bulbasaur')) return jsonResponse(bulbasaurPokemon);
+  if (url.includes('/pokemon-species/10007')) return notFoundResponse();
+  if (url.includes('/pokemon-species/487')) return jsonResponse(giratinaSpecies);
+  if (url.includes('/pokemon-species/')) return jsonResponse(bulbasaurSpecies);
+  throw new Error(`Unexpected fetch: ${url}`);
+});
+
+/** Same page, but the variety's OWN species link 404s — the item must still hydrate, category null. */
+const createVarietyListMissingSpeciesFetch = () => jest.fn(async (url) => {
+  if (url.includes('/pokemon?')) return jsonResponse(varietyListBody);
+  if (url.includes('/pokemon/giratina-origin')) return jsonResponse(giratinaOriginPokemon);
+  if (url.includes('/pokemon/bulbasaur')) return jsonResponse(bulbasaurPokemon);
+  if (url.includes('/pokemon-species/487')) return notFoundResponse();
+  if (url.includes('/pokemon-species/')) return jsonResponse(bulbasaurSpecies);
+  throw new Error(`Unexpected fetch: ${url}`);
+});
+
 describe('PokeApiClient', () => {
   it('assembles a browse page from the list, pokemon and species endpoints', async () => {
     const fetchFn = createRouteFetch();
@@ -332,6 +369,48 @@ describe('PokeApiClient', () => {
       { name: 'overgrow', slot: 1, isHidden: false },
       { name: 'chlorophyll', slot: 3, isHidden: true },
     ]);
+  });
+
+  it('hydrates a browse page entry that is a non-default variety via pokemon.species.url', async () => {
+    const fetchFn = createVarietyListFetch();
+    const client = createPokeApiClient({
+      baseUrl: BASE_URL,
+      l1: createMemoryCache(),
+      l2: createMemoryCache(),
+      l1TtlSeconds: 300,
+      l2TtlSeconds: 3600,
+      fetchFn,
+    });
+
+    const page = await client.getPokemonPage(1, 20);
+
+    expect(page.items.map((item) => item.name)).toEqual(['bulbasaur', 'giratina-origin']);
+    expect(page.items[1]).toMatchObject({
+      pokeApiId: 10007,
+      name: 'giratina-origin',
+      category: 'Renegade Pokémon',
+      weight: 6500,
+    });
+    // The species id (487), never the pokemon id (10007), is what the hydrator asked for.
+    expect(fetchFn.mock.calls.map(([url]) => url)).toContain(`${BASE_URL}/pokemon-species/487/`);
+    expect(fetchFn.mock.calls.map(([url]) => url)).not.toContain(`${BASE_URL}/pokemon-species/10007`);
+  });
+
+  it('keeps a browse page item with a null category when its species link 404s', async () => {
+    const fetchFn = createVarietyListMissingSpeciesFetch();
+    const client = createPokeApiClient({
+      baseUrl: BASE_URL,
+      l1: createMemoryCache(),
+      l2: createMemoryCache(),
+      l1TtlSeconds: 300,
+      l2TtlSeconds: 3600,
+      fetchFn,
+    });
+
+    const page = await client.getPokemonPage(1, 20);
+
+    expect(page.items.map((item) => item.name)).toEqual(['bulbasaur', 'giratina-origin']);
+    expect(page.items[1]).toMatchObject({ name: 'giratina-origin', category: null });
   });
 
   it('serves a repeated identical page from cache without additional fetches', async () => {

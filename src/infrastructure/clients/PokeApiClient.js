@@ -109,7 +109,12 @@ const createPokeApiClient = ({
     const pokemon = await fetchJson(`${baseUrl}/pokemon/${name}`);
     if (pokemon === null) return null;
 
-    const species = await fetchJson(`${baseUrl}/pokemon-species/${pokemon.id}`);
+    // Same authoritative link the detail path uses: a browse page is a page of VARIETIES, and a
+    // non-default variety's numeric id (giratina-origin is 10007) has no species resource of its
+    // own, so a hand-built `/pokemon-species/{pokemon.id}` 404s and silently drops `category`.
+    // A genuinely absent species still degrades gracefully to `category: null` (a 404 here is a
+    // null species, not a throw), while a transient 5xx still rejects and drops the whole item.
+    const species = await fetchJson(pokemon.species.url);
     const englishGenus = species !== null ? pickEnglish(species.genera) : undefined;
 
     return {
