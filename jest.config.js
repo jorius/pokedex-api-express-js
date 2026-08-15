@@ -7,11 +7,16 @@ export default {
     'src/infrastructure/cache/**/*.js',
     'src/infrastructure/clients/**/*.js',
     'src/infrastructure/lifecycle/**/*.js',
+    'src/infrastructure/config/Env.js',
     'src/presentation/middleware/Auth.js',
     'src/presentation/middleware/ErrorHandler.js',
-    // Typedef-only modules: JSDoc @typedef declarations with a bare `export {};`,
-    // no executable statements. They are type documentation, not code, and
-    // trivially skew coverage to 0% for files that can never be "tested".
+    // Coverage scope implements spec §9: unit tests cover the application services,
+    // domain, cache/client/lifecycle infrastructure, env validation and the two
+    // HTTP middlewares. Deliberately NOT unit-measured (verified via live smoke
+    // probes and the cross-service phase gate instead): repositories and database
+    // wiring (need a live PostgreSQL), controllers/routes/App/Container/Server
+    // (thin composition), swagger definitions, Response helper, and Logger.
+    // Typedef-only modules (application/ports, domain/types) contain no executable code.
     '!src/application/ports/**',
     '!src/domain/types/**',
   ],
