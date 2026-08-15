@@ -11,6 +11,7 @@ import authRoutes from './routes/AuthRoutes.js';
 import pokemonsRoutes from './routes/PokemonsRoutes.js';
 
 // middleware
+import { cors } from './middleware/Cors.js';
 import { errorHandler } from './middleware/ErrorHandler.js';
 // utils
 import { fail } from './utils/Response.js';
@@ -18,6 +19,7 @@ import { fail } from './utils/Response.js';
 const createApp = () => {
   const app = express();
 
+  app.use(cors);
   app.use(express.json());
 
   // Swagger is available in every non-production environment and disabled in production.
