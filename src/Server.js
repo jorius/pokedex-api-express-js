@@ -27,6 +27,10 @@ await redisCache.connect();
 
 const app = createApp();
 
+// No host argument on purpose: Node's net.Server.listen defaults to the unspecified address
+// (:: with dual-stack, i.e. every interface), so the API already answers on the machine's LAN
+// address as well as localhost — a phone at http://192.168.0.254:3000 reaches it. Passing an
+// explicit host here would be the thing that breaks LAN access, not the thing that enables it.
 const server = app.listen(env.port, () => {
   logger.info(`Pokedex API listening on port ${env.port} (${env.nodeEnv})`);
 });
