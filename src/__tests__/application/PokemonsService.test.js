@@ -26,6 +26,26 @@ const detail = {
   evolutionChain: ['bulbasaur', 'ivysaur', 'venusaur'],
 };
 
+// Slots deliberately out of order — mirrors how a re-sync can hand the repository abilities
+// in whatever order Postgres's heap happens to return them in.
+const shuffledAbilitiesDetail = {
+  pokeApiId: 7,
+  name: 'squirtle',
+  spriteUrl: 'squirtle.png',
+  category: 'Tiny Turtle Pokémon',
+  weight: 90,
+  height: 5,
+  description: 'Shoots water at prey.',
+  types: ['water'],
+  abilities: [
+    { name: 'rain-dish', slot: 3, isHidden: true },
+    { name: 'torrent', slot: 1, isHidden: false },
+    { name: 'shell-armor', slot: 2, isHidden: false },
+  ],
+  stats: [{ name: 'hp', value: 44 }],
+  evolutionChain: ['squirtle', 'wartortle', 'blastoise'],
+};
+
 const local = {
   id: '4b36c8a7-3d61-4bfe-a437-95b3ef1478f6',
   pokeApiId: 1,
@@ -95,8 +115,11 @@ const createInMemoryRepository = () => {
 
   return {
     upsertFromDetail: async (userId, incoming) => {
-      shared.set(incoming.pokeApiId, incoming);
-      const existing = entries.find((entry) => entry.userId === userId && entry.pokeApiId === incoming.pokeApiId);
+      // Sorted by slot, mirroring the Drizzle adapter's deterministic ordering fix.
+      const sortedAbilities = [...incoming.abilities].sort((a, b) => a.slot - b.slot);
+      const normalized = { ...incoming, abilities: sortedAbilities };
+      shared.set(normalized.pokeApiId, normalized);
+      const existing = entries.find((entry) => entry.userId === userId && entry.pokeApiId === normalized.pokeApiId);
       if (existing) {
         existing.updatedAt = new Date();
         return toLocal(existing);
@@ -105,7 +128,7 @@ const createInMemoryRepository = () => {
       const created = {
         id: nextId(),
         userId,
-        pokeApiId: incoming.pokeApiId,
+        pokeApiId: normalized.pokeApiId,
         localizedName: null,
         region: null,
         classificationTag: null,
@@ -302,7 +325,9 @@ describe('PokemonsService with in-memory repository (ownership semantics)', () =
 
   beforeEach(() => {
     pokeApiClient = createPokeApiClientMock();
-    pokeApiClient.getPokemonDetail.mockResolvedValue(detail);
+    pokeApiClient.getPokemonDetail.mockImplementation(
+      async (idOrName) => (idOrName === '7' ? shuffledAbilitiesDetail : detail),
+    );
     service = createPokemonsService({ pokeApiClient, pokemonsRepository: createInMemoryRepository() });
   });
 
@@ -378,5 +403,15 @@ describe('PokemonsService with in-memory repository (ownership semantics)', () =
     // The shared pokemon keeps its flavor text for other users.
     const entryB = await service.syncById(USER_B, 1);
     expect(entryB.description).toBe('A strange seed.');
+  });
+
+  it('abilities come back slot-ordered even when the source array is shuffled', async () => {
+    const synced = await service.syncById(USER_A, 7);
+    expect(synced.abilities.map((a) => a.slot)).toEqual([1, 2, 3]);
+    expect(synced.abilities.map((a) => a.name)).toEqual(['torrent', 'shell-armor', 'rain-dish']);
+
+    // A later read agrees with the fresh sync, not just the sync response itself.
+    const found = await service.getLocalByPokeApiId(USER_A, 7);
+    expect(found.abilities.map((a) => a.slot)).toEqual([1, 2, 3]);
   });
 });

@@ -51,7 +51,9 @@ const abilitiesFor = async (pokemonIds) => {
     return new Map();
   }
 
-  const rows = await db.select().from(pokemonAbilities).where(inArray(pokemonAbilities.pokemonId, pokemonIds));
+  const rows = await db.select().from(pokemonAbilities)
+    .where(inArray(pokemonAbilities.pokemonId, pokemonIds))
+    .orderBy(asc(pokemonAbilities.slot));
 
   const grouped = new Map();
   rows.forEach((row) => {
@@ -92,8 +94,12 @@ const pokemonsRepository = {
 
     await tx.delete(pokemonAbilities).where(eq(pokemonAbilities.pokemonId, row.id));
 
-    if (detail.abilities.length > 0) {
-      await tx.insert(pokemonAbilities).values(detail.abilities.map((ability) => ({
+    // Sorted by slot (unique, 1-based per PokeAPI) so a fresh sync and a later read agree
+    // on ordering, regardless of the physical row order Postgres happens to reuse.
+    const sortedAbilities = [...detail.abilities].sort((a, b) => a.slot - b.slot);
+
+    if (sortedAbilities.length > 0) {
+      await tx.insert(pokemonAbilities).values(sortedAbilities.map((ability) => ({
         pokemonId: row.id,
         name: ability.name,
         slot: ability.slot,
@@ -111,7 +117,7 @@ const pokemonsRepository = {
       })
       .returning();
 
-    return toLocal(entry, row, detail.abilities);
+    return toLocal(entry, row, sortedAbilities);
   }),
 
   findPage: async (userId, page, pageSize) => {
