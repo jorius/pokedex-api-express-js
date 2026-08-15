@@ -91,9 +91,16 @@ const createPokeApiClient = ({
     ]);
   };
 
-  const fetchJson = async (url) => {
+  const fetchJson = async (url, treatBadRequestAsNotFound = false) => {
     const response = await fetchFn(url);
     if (response.status === 404) return null;
+    // PokeAPI answers 400 (not 404) for a name it cannot route at all — an apostrophe, a period
+    // or a bare space breaks its path-segment matching (farfetch'd, mr. mime, ho oh) — which is a
+    // user SPELLING problem, not a malformed request we built. For name-keyed lookups that 400 is
+    // therefore folded into the same "not found" outcome as a 404 instead of surfacing as a 500;
+    // callers that pass an internally-constructed URL (ids, evolution-chain links) leave this off
+    // so a genuine 400 there still propagates as the error it is.
+    if (treatBadRequestAsNotFound && response.status === 400) return null;
     if (!response.ok) throw new Error(`PokeAPI request failed (${response.status}) for ${url}`);
     return response.json();
   };
@@ -158,10 +165,10 @@ const createPokeApiClient = ({
    * same resource). A `null` species in the result simply means "not fetched yet, assemble as usual".
    */
   const resolvePokemon = async (idOrName) => {
-    const direct = await fetchJson(`${baseUrl}/pokemon/${idOrName}`);
+    const direct = await fetchJson(`${baseUrl}/pokemon/${idOrName}`, true);
     if (direct !== null) return { pokemon: direct, species: null };
 
-    const species = await fetchJson(`${baseUrl}/pokemon-species/${idOrName}`);
+    const species = await fetchJson(`${baseUrl}/pokemon-species/${idOrName}`, true);
     if (species === null) return null;
 
     const defaultVariety = pickDefaultVariety(species);
@@ -180,7 +187,11 @@ const createPokeApiClient = ({
     if (resolved === null) return null;
 
     const { pokemon } = resolved;
-    const species = resolved.species ?? await fetchJson(`${baseUrl}/pokemon-species/${pokemon.id}`);
+    // pokemon.species.url (not `/pokemon-species/{pokemon.id}`) is the authoritative link: a
+    // NON-DEFAULT variety's numeric id (giratina-origin is 10007) has no species resource of its
+    // own, so constructing the URL from the id 404s and silently drops category/description/chain.
+    // The species resource is keyed by the SPECIES id, which pokemon.species.url already encodes.
+    const species = resolved.species ?? await fetchJson(pokemon.species.url);
     const englishGenus = species !== null ? pickEnglish(species.genera) : undefined;
     const englishFlavorText = species !== null ? pickEnglish(species.flavor_text_entries) : undefined;
     const description = englishFlavorText !== undefined ? englishFlavorText.flavor_text.replace(/\s+/g, ' ').trim() : null;

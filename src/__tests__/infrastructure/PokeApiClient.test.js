@@ -197,6 +197,32 @@ const giratinaChain = {
   },
 };
 
+/**
+ * A NON-DEFAULT variety, fetchable directly by name (unlike plain `giratina`) but whose numeric
+ * pokemon id (the real PokeAPI id for giratina-origin) has NO species resource of its own — only
+ * `species.url` (pointing at the shared giratina species, id 487) is a valid species link.
+ */
+const giratinaOriginPokemon = {
+  id: 10007,
+  name: 'giratina-origin',
+  weight: 6500,
+  height: 45,
+  sprites: {
+    front_default: 'giratina-origin-sprite.png',
+  },
+  abilities: [
+    { ability: { name: 'levitate' }, is_hidden: false, slot: 1 },
+  ],
+  stats: [
+    { base_stat: 150, stat: { name: 'hp' } },
+  ],
+  types: [
+    { type: { name: 'ghost' } },
+    { type: { name: 'dragon' } },
+  ],
+  species: { url: `${BASE_URL}/pokemon-species/487/` },
+};
+
 const jsonResponse = (body) => ({
   ok: true,
   status: 200,
@@ -206,6 +232,12 @@ const jsonResponse = (body) => ({
 const notFoundResponse = () => ({
   ok: false,
   status: 404,
+  json: async () => ({}),
+});
+
+const badRequestResponse = () => ({
+  ok: false,
+  status: 400,
   json: async () => ({}),
 });
 
@@ -258,6 +290,19 @@ const createEeveeFetch = () => jest.fn(async (url) => {
   if (url.includes('/pokemon-species/')) return jsonResponse(eeveeSpecies);
   if (url.includes('/evolution-chain/')) return jsonResponse(eeveeChain);
   if (url.includes('/pokemon/')) return jsonResponse(eeveePokemon);
+  throw new Error(`Unexpected fetch: ${url}`);
+});
+
+/**
+ * giratina-origin resolves directly (no fallback needed) but its numeric id (10007) has no
+ * species resource — only species.url (pokemon-species/487) does. A client that still constructs
+ * the species URL from pokemon.id would 404 here and silently degrade category/description/chain.
+ */
+const createNonDefaultVarietyFetch = () => jest.fn(async (url) => {
+  if (url.includes('/pokemon/giratina-origin')) return jsonResponse(giratinaOriginPokemon);
+  if (url.includes('/pokemon-species/10007')) return notFoundResponse();
+  if (url.includes('/pokemon-species/487')) return jsonResponse(giratinaSpecies);
+  if (url.includes('/evolution-chain/')) return jsonResponse(giratinaChain);
   throw new Error(`Unexpected fetch: ${url}`);
 });
 
@@ -520,9 +565,11 @@ describe('PokeApiClient', () => {
 
     await client.getPokemonDetail('bulbasaur');
 
+    // pokemon-species/1/ (trailing slash) — not a hand-built pokemon-species/{id} — because the
+    // species URL always comes from pokemon.species.url now (see the non-default-variety test).
     expect(fetchFn.mock.calls.map(([url]) => url)).toEqual([
       `${BASE_URL}/pokemon/bulbasaur`,
-      `${BASE_URL}/pokemon-species/1`,
+      `${BASE_URL}/pokemon-species/1/`,
       `${BASE_URL}/evolution-chain/1/`,
     ]);
   });
@@ -563,5 +610,44 @@ describe('PokeApiClient', () => {
     expect(second?.name).toBe('giratina-altered');
     expect(fetchFn.mock.calls.length).toBe(callCountAfterFirst);
     expect(await l1.get('pokeapi:pokemon:giratina')).not.toBeNull();
+  });
+
+  it('resolves a non-default variety with its species data via pokemon.species.url, not /pokemon-species/{id}', async () => {
+    const fetchFn = createNonDefaultVarietyFetch();
+    const client = createPokeApiClient({
+      baseUrl: BASE_URL,
+      l1: createMemoryCache(),
+      l2: createMemoryCache(),
+      l1TtlSeconds: 300,
+      l2TtlSeconds: 3600,
+      fetchFn,
+    });
+
+    const detail = await client.getPokemonDetail('giratina-origin');
+
+    expect(detail?.pokeApiId).toBe(10007);
+    expect(detail?.category).toBe('Renegade Pokémon');
+    expect(detail?.description).toBe('It was banished for its violence.');
+    expect(detail?.evolutionChain).toEqual(['giratina']);
+  });
+
+  it('resolves null (not a throw) when PokeAPI answers 400 for a punctuated name, on both the direct and species-fallback lookups', async () => {
+    const fetchFn = jest.fn(async () => badRequestResponse());
+    const client = createPokeApiClient({
+      baseUrl: BASE_URL,
+      l1: createMemoryCache(),
+      l2: createMemoryCache(),
+      l1TtlSeconds: 300,
+      l2TtlSeconds: 3600,
+      fetchFn,
+    });
+
+    const detail = await client.getPokemonDetail("farfetch'd");
+
+    expect(detail).toBeNull();
+    expect(fetchFn.mock.calls.map(([url]) => url)).toEqual([
+      `${BASE_URL}/pokemon/farfetch'd`,
+      `${BASE_URL}/pokemon-species/farfetch'd`,
+    ]);
   });
 });
