@@ -20,6 +20,8 @@ module.exports = {
     eqeqeq: ['error', 'always'],
     'prefer-const': 'error',
     'no-var': 'error',
+    // Allow `void someAsyncCall();` as a statement — marks a deliberately-unawaited promise (e.g. fire-and-forget shutdown handlers).
+    'no-void': ['error', { allowAsStatement: true }],
     'no-unused-vars': ['error', { argsIgnorePattern: '^_|^next$' }],
     'no-shadow': 'warn',
     'no-console': 'warn',
