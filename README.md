@@ -97,7 +97,7 @@ flowchart LR
     L2 -->|miss| NET["PokeAPI network"] --> STORE["write L1 + L2"] --> RESP
 ```
 
-- **Key scheme, shared verbatim by all three backends** so they can share L2 hits: `pokeapi:list:{page}:{pageSize}` and `pokeapi:pokemon:{idOrName}`. (In practice the .NET service's HybridCache wraps values in its own payload envelope, so the Node services and .NET share the Redis *instance* and key scheme but treat each other's entries as a miss — see the .NET repo's README for the documented trade-off.)
+- **Key scheme, shared verbatim by all three backends** so they can share L2 hits: `pokeapi:v2:list:{page}:{pageSize}` and `pokeapi:v2:pokemon:{idOrName}`. The `v2` segment versions the ASSEMBLED PAYLOAD SHAPE (not PokeAPI's version) and was introduced together with `shinySpriteUrl`; bumping it retires every entry written under the pre-shiny `pokeapi:list:…`/`pokeapi:pokemon:…` keys at once instead of serving a stale shape until its TTL expires. All three services must bump in lockstep — the scheme is part of the cross-service contract. (In practice the .NET service's HybridCache wraps values in its own payload envelope, so the Node services and .NET share the Redis *instance* and key scheme but treat each other's entries as a miss — see the .NET repo's README for the documented trade-off.)
 - **Partial pages are never cached.** List hydration fans out one request per Pokemon; a transient failure drops that entry from the page (`Promise.allSettled`), but a page containing any rejection is served once and *not* written to cache, so the next request retries against the network.
 - **404s are never cached.** An upstream 404 maps to `null`/`NotFoundError` without a cache write.
 - **Malformed cache entries degrade to a miss** — a corrupt L1/L2 value can never crash a request.
@@ -364,6 +364,7 @@ Every response — success, error, even the 404 catch-all — uses the same shap
       "pokeApiId": 1,
       "name": "bulbasaur",
       "spriteUrl": "https://raw.githubusercontent.com/PokeAPI/sprites/.../1.png",
+      "shinySpriteUrl": "https://raw.githubusercontent.com/PokeAPI/sprites/.../shiny/1.png",
       "category": "Seed Pokémon",
       "weight": 69,
       "abilities": [{ "name": "overgrow", "slot": 1, "isHidden": false }]
@@ -385,6 +386,7 @@ A collection entry (`GET /api/pokemons/local`, `GET /api/pokemons/local/by-poke-
       "pokeApiId": 1,
       "name": "bulbasaur",
       "spriteUrl": "https://raw.githubusercontent.com/PokeAPI/sprites/.../1.png",
+      "shinySpriteUrl": "https://raw.githubusercontent.com/PokeAPI/sprites/.../shiny/1.png",
       "category": "Seed Pokémon",
       "weight": 69,
       "description": "A strange seed.",

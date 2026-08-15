@@ -17,9 +17,11 @@ const bulbasaurPokemon = {
   height: 7,
   sprites: {
     front_default: 'sprite.png',
+    front_shiny: 'shiny-sprite.png',
     other: {
       'official-artwork': {
         front_default: 'art.png',
+        front_shiny: 'shiny-art.png',
       },
     },
   },
@@ -78,6 +80,7 @@ const ivysaurPokemon = {
   height: 10,
   sprites: {
     front_default: 'ivysaur-sprite.png',
+    front_shiny: 'ivysaur-shiny-sprite.png',
   },
   abilities: [
     { ability: { name: 'overgrow' }, is_hidden: false, slot: 1 },
@@ -98,6 +101,7 @@ const eeveePokemon = {
   height: 3,
   sprites: {
     front_default: 'eevee-sprite.png',
+    front_shiny: 'eevee-shiny-sprite.png',
   },
   abilities: [
     { ability: { name: 'run-away' }, is_hidden: false, slot: 1 },
@@ -176,6 +180,7 @@ const giratinaAlteredPokemon = {
   height: 45,
   sprites: {
     front_default: 'giratina-sprite.png',
+    front_shiny: 'giratina-shiny-sprite.png',
   },
   abilities: [
     { ability: { name: 'pressure' }, is_hidden: false, slot: 1 },
@@ -207,8 +212,10 @@ const giratinaOriginPokemon = {
   name: 'giratina-origin',
   weight: 6500,
   height: 45,
+  // No shiny at all, at either resolution — the null case the frontend toggle must tolerate.
   sprites: {
     front_default: 'giratina-origin-sprite.png',
+    front_shiny: null,
   },
   abilities: [
     { ability: { name: 'levitate' }, is_hidden: false, slot: 1 },
@@ -233,6 +240,41 @@ const varietyListBody = {
     { name: 'bulbasaur', url: `${BASE_URL}/pokemon/1/` },
     { name: 'giratina-origin', url: `${BASE_URL}/pokemon/10007/` },
   ],
+};
+
+/**
+ * Bulbasaur as PokeAPI serves plenty of real entries: the official-artwork block EXISTS and
+ * carries a normal front_default, but its shiny variant is null. The shiny url must then fall
+ * back to the low-resolution top-level sprite rather than degrading straight to null — the
+ * artwork-missing case called out in the shiny brief.
+ */
+const artworkWithoutShinyPokemon = {
+  ...bulbasaurPokemon,
+  sprites: {
+    front_default: 'sprite.png',
+    front_shiny: 'shiny-sprite.png',
+    other: {
+      'official-artwork': {
+        front_default: 'art.png',
+        front_shiny: null,
+      },
+    },
+  },
+};
+
+/** Same entry with no shiny anywhere — neither artwork nor top-level. */
+const noShinyAnywherePokemon = {
+  ...bulbasaurPokemon,
+  sprites: {
+    front_default: 'sprite.png',
+    front_shiny: null,
+    other: {
+      'official-artwork': {
+        front_default: 'art.png',
+        front_shiny: null,
+      },
+    },
+  },
 };
 
 const jsonResponse = (body) => ({
@@ -295,6 +337,15 @@ const createFormOnlyFetch = (species = giratinaSpecies) => jest.fn(async (url) =
   if (url.includes('/pokemon-species/giratina')) return jsonResponse(species);
   if (url.includes('/pokemon-species/')) return jsonResponse(species);
   if (url.includes('/evolution-chain/')) return jsonResponse(giratinaChain);
+  throw new Error(`Unexpected fetch: ${url}`);
+});
+
+/** The standard bulbasaur routes, but serving a caller-supplied pokemon body (sprite variants). */
+const createSpriteVariantFetch = (pokemon) => jest.fn(async (url) => {
+  if (url.includes('/pokemon-species/')) return jsonResponse(bulbasaurSpecies);
+  if (url.includes('/evolution-chain/')) return jsonResponse(bulbasaurChain);
+  if (url.includes('/pokemon?')) return jsonResponse(pokemonListBody);
+  if (url.includes('/pokemon/')) return jsonResponse(pokemon);
   throw new Error(`Unexpected fetch: ${url}`);
 });
 
@@ -540,7 +591,7 @@ describe('PokeApiClient', () => {
   it('falls through to network when a cache tier holds a corrupt entry', async () => {
     const fetchFn = createRouteFetch();
     const l1 = createMemoryCache();
-    await l1.set('pokeapi:pokemon:bulbasaur', '{not-valid-json', 300);
+    await l1.set('pokeapi:v2:pokemon:bulbasaur', '{not-valid-json', 300);
 
     const client = createPokeApiClient({
       baseUrl: BASE_URL,
@@ -688,7 +739,7 @@ describe('PokeApiClient', () => {
 
     expect(second?.name).toBe('giratina-altered');
     expect(fetchFn.mock.calls.length).toBe(callCountAfterFirst);
-    expect(await l1.get('pokeapi:pokemon:giratina')).not.toBeNull();
+    expect(await l1.get('pokeapi:v2:pokemon:giratina')).not.toBeNull();
   });
 
   it('resolves a non-default variety with its species data via pokemon.species.url, not /pokemon-species/{id}', async () => {
@@ -708,6 +759,139 @@ describe('PokeApiClient', () => {
     expect(detail?.category).toBe('Renegade Pokémon');
     expect(detail?.description).toBe('It was banished for its violence.');
     expect(detail?.evolutionChain).toEqual(['giratina']);
+  });
+
+  it('prefers the official-artwork shiny over the top-level shiny sprite', async () => {
+    const fetchFn = createRouteFetch();
+    const client = createPokeApiClient({
+      baseUrl: BASE_URL,
+      l1: createMemoryCache(),
+      l2: createMemoryCache(),
+      l1TtlSeconds: 300,
+      l2TtlSeconds: 3600,
+      fetchFn,
+    });
+
+    const detail = await client.getPokemonDetail('bulbasaur');
+
+    expect(detail?.spriteUrl).toBe('art.png');
+    expect(detail?.shinySpriteUrl).toBe('shiny-art.png');
+  });
+
+  it('falls back to the top-level shiny sprite when the official artwork carries no shiny variant', async () => {
+    const fetchFn = createSpriteVariantFetch(artworkWithoutShinyPokemon);
+    const client = createPokeApiClient({
+      baseUrl: BASE_URL,
+      l1: createMemoryCache(),
+      l2: createMemoryCache(),
+      l1TtlSeconds: 300,
+      l2TtlSeconds: 3600,
+      fetchFn,
+    });
+
+    const detail = await client.getPokemonDetail('bulbasaur');
+
+    // The non-shiny url still comes from the artwork block — the fallback is shiny-side only.
+    expect(detail?.spriteUrl).toBe('art.png');
+    expect(detail?.shinySpriteUrl).toBe('shiny-sprite.png');
+  });
+
+  it('resolves a null shiny sprite when PokeAPI has no shiny at either resolution', async () => {
+    const fetchFn = createSpriteVariantFetch(noShinyAnywherePokemon);
+    const client = createPokeApiClient({
+      baseUrl: BASE_URL,
+      l1: createMemoryCache(),
+      l2: createMemoryCache(),
+      l1TtlSeconds: 300,
+      l2TtlSeconds: 3600,
+      fetchFn,
+    });
+
+    const detail = await client.getPokemonDetail('bulbasaur');
+
+    expect(detail?.spriteUrl).toBe('art.png');
+    expect(detail?.shinySpriteUrl).toBeNull();
+  });
+
+  it('carries a shiny sprite url on every browse page item, including the null case', async () => {
+    const fetchFn = createVarietyListFetch();
+    const client = createPokeApiClient({
+      baseUrl: BASE_URL,
+      l1: createMemoryCache(),
+      l2: createMemoryCache(),
+      l1TtlSeconds: 300,
+      l2TtlSeconds: 3600,
+      fetchFn,
+    });
+
+    const page = await client.getPokemonPage(1, 20);
+
+    expect(page.items.every((item) => 'shinySpriteUrl' in item)).toBe(true);
+    expect(page.items[0]?.shinySpriteUrl).toBe('shiny-art.png');
+    expect(page.items[1]?.shinySpriteUrl).toBeNull();
+  });
+
+  it('places shinySpriteUrl immediately after spriteUrl in the assembled detail', async () => {
+    const fetchFn = createRouteFetch();
+    const client = createPokeApiClient({
+      baseUrl: BASE_URL,
+      l1: createMemoryCache(),
+      l2: createMemoryCache(),
+      l1TtlSeconds: 300,
+      l2TtlSeconds: 3600,
+      fetchFn,
+    });
+
+    const detail = await client.getPokemonDetail('bulbasaur');
+
+    // Key ORDER is part of the cross-service contract, not just key presence.
+    expect(Object.keys(detail ?? {})).toEqual([
+      'pokeApiId', 'name', 'spriteUrl', 'shinySpriteUrl', 'category', 'weight',
+      'height', 'description', 'types', 'abilities', 'stats', 'evolutionChain',
+    ]);
+  });
+
+  it('caches assembled results under the v2 key scheme and leaves the pre-shiny keys untouched', async () => {
+    const fetchFn = createRouteFetch();
+    const l1 = createMemoryCache();
+    const client = createPokeApiClient({
+      baseUrl: BASE_URL,
+      l1,
+      l2: createMemoryCache(),
+      l1TtlSeconds: 300,
+      l2TtlSeconds: 3600,
+      fetchFn,
+    });
+
+    await client.getPokemonDetail('bulbasaur');
+    await client.getPokemonPage(1, 20);
+
+    expect(await l1.get('pokeapi:v2:pokemon:bulbasaur')).not.toBeNull();
+    expect(await l1.get('pokeapi:v2:list:1:20')).not.toBeNull();
+    // The old scheme must never be read or written again: its payloads predate shinySpriteUrl.
+    expect(await l1.get('pokeapi:pokemon:bulbasaur')).toBeNull();
+    expect(await l1.get('pokeapi:list:1:20')).toBeNull();
+  });
+
+  it('ignores a pre-shiny payload parked under the old key scheme', async () => {
+    const fetchFn = createRouteFetch();
+    const l1 = createMemoryCache();
+    // A v1 entry as it would have been written before this change — no shinySpriteUrl.
+    await l1.set('pokeapi:pokemon:bulbasaur', JSON.stringify({ pokeApiId: 1, name: 'stale-bulbasaur', spriteUrl: 'old.png' }), 300);
+
+    const client = createPokeApiClient({
+      baseUrl: BASE_URL,
+      l1,
+      l2: createMemoryCache(),
+      l1TtlSeconds: 300,
+      l2TtlSeconds: 3600,
+      fetchFn,
+    });
+
+    const detail = await client.getPokemonDetail('bulbasaur');
+
+    expect(detail?.name).toBe('bulbasaur');
+    expect(detail?.shinySpriteUrl).toBe('shiny-art.png');
   });
 
   it('resolves null (not a throw) when PokeAPI answers 400 for a punctuated name, on both the direct and species-fallback lookups', async () => {

@@ -38,6 +38,7 @@ const toLocal = (entry, pokemon, abilities) => ({
   pokeApiId: pokemon.pokeApiId,
   name: pokemon.name,
   spriteUrl: pokemon.spriteUrl,
+  shinySpriteUrl: pokemon.shinySpriteUrl,
   category: pokemon.category,
   weight: pokemon.weight,
   // The entry's description is a per-user override of the shared flavor text.
@@ -88,6 +89,7 @@ const pokemonsRepository = {
         pokeApiId: detail.pokeApiId,
         name: detail.name,
         spriteUrl: detail.spriteUrl,
+        shinySpriteUrl: detail.shinySpriteUrl,
         category: detail.category,
         weight: detail.weight,
         description: detail.description,
@@ -97,6 +99,7 @@ const pokemonsRepository = {
         set: {
           name: detail.name,
           spriteUrl: detail.spriteUrl,
+          shinySpriteUrl: detail.shinySpriteUrl,
           category: detail.category,
           weight: detail.weight,
           description: detail.description,

@@ -7,7 +7,14 @@
  * Two-tier read-through cache on ASSEMBLED results:
  *   L1 (memory, short TTL) → L2 (shared Redis, long TTL) → network.
  * Key scheme is shared verbatim by all three backend services:
- *   pokeapi:list:{page}:{pageSize}   pokeapi:pokemon:{idOrName}
+ *   pokeapi:v2:list:{page}:{pageSize}   pokeapi:v2:pokemon:{idOrName}
+ *
+ * The `v2` segment VERSIONS THE ASSEMBLED SHAPE, not the PokeAPI version. It was
+ * introduced with shinySpriteUrl: entries written under the old `pokeapi:list:…` /
+ * `pokeapi:pokemon:…` keys hold payloads that predate the field, so bumping the key
+ * scheme retires them all at once instead of serving a stale shape until their TTL
+ * expires. All three services must bump together — the scheme is part of the
+ * cross-service contract. Any future field addition bumps it again.
  *
  * PokeAPI natively accepts id-or-name in one path segment, so this internal
  * gateway keeps a single detail method; the REST surface stays split.
@@ -22,6 +29,13 @@ const mapAbilities = (abilities) => abilities.map((ability) => ({
 }));
 
 const pickSprite = (sprites) => sprites.other?.['official-artwork']?.front_default ?? sprites.front_default ?? null;
+
+/**
+ * Shiny counterpart of pickSprite, with the SAME precedence: the high-resolution
+ * official artwork first, the low-resolution top-level sprite as the fallback, null
+ * when PokeAPI has neither (plenty of forms and newer entries ship no shiny artwork).
+ */
+const pickShinySprite = (sprites) => sprites.other?.['official-artwork']?.front_shiny ?? sprites.front_shiny ?? null;
 
 const pickEnglish = (entries) => entries.find((entry) => entry.language.name === 'en');
 
@@ -121,6 +135,7 @@ const createPokeApiClient = ({
       pokeApiId: pokemon.id,
       name: pokemon.name,
       spriteUrl: pickSprite(pokemon.sprites),
+      shinySpriteUrl: pickShinySprite(pokemon.sprites),
       category: englishGenus?.genus ?? null,
       weight: pokemon.weight,
       abilities: mapAbilities(pokemon.abilities),
@@ -128,7 +143,7 @@ const createPokeApiClient = ({
   };
 
   const getPokemonPage = async (page, pageSize) => {
-    const key = `pokeapi:list:${page}:${pageSize}`;
+    const key = `pokeapi:v2:list:${page}:${pageSize}`;
     const cached = await readCache(key);
     if (cached !== null) return cached;
 
@@ -184,7 +199,7 @@ const createPokeApiClient = ({
   };
 
   const getPokemonDetail = async (idOrName) => {
-    const key = `pokeapi:pokemon:${idOrName}`;
+    const key = `pokeapi:v2:pokemon:${idOrName}`;
     const cached = await readCache(key);
     if (cached !== null) return cached;
 
@@ -210,6 +225,7 @@ const createPokeApiClient = ({
       pokeApiId: pokemon.id,
       name: pokemon.name,
       spriteUrl: pickSprite(pokemon.sprites),
+      shinySpriteUrl: pickShinySprite(pokemon.sprites),
       category: englishGenus?.genus ?? null,
       weight: pokemon.weight,
       height: pokemon.height,

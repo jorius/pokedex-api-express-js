@@ -17,6 +17,7 @@
  * @property {number} pokeApiId
  * @property {string} name
  * @property {string|null} spriteUrl
+ * @property {string|null} shinySpriteUrl
  * @property {string|null} category
  * @property {number} weight
  * @property {PokemonAbility[]} abilities
@@ -25,6 +26,7 @@
  * @property {number} pokeApiId
  * @property {string} name
  * @property {string|null} spriteUrl
+ * @property {string|null} shinySpriteUrl
  * @property {string|null} category
  * @property {number} weight
  * @property {PokemonAbility[]} abilities
@@ -46,6 +48,7 @@
  * @property {number} pokeApiId
  * @property {string} name
  * @property {string|null} spriteUrl
+ * @property {string|null} shinySpriteUrl
  * @property {string|null} category
  * @property {number|null} weight
  * @property {string|null} description

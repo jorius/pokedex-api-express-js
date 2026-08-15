@@ -37,6 +37,10 @@ const pokemons = pgTable('pokemons', {
   pokeApiId: integer('poke_api_id').notNull().unique(),
   name: text('name').notNull(),
   spriteUrl: text('sprite_url'),
+  // Nullable, and NULL for every row synced before shiny support landed: the value is
+  // backfilled naturally the next time that species is caught/re-synced. PokeAPI itself
+  // also has no shiny artwork for some entries, so NULL is a legitimate steady state.
+  shinySpriteUrl: text('shiny_sprite_url'),
   category: text('category'),
   weight: integer('weight'),
   description: text('description'),
