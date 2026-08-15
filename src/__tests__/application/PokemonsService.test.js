@@ -9,6 +9,9 @@ import { createPokemonsService } from '../../application/services/PokemonsServic
 import { NotFoundError } from '../../domain/errors/NotFoundError.js';
 import { ValidationError } from '../../domain/errors/ValidationError.js';
 
+const USER_A = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+const USER_B = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+
 const detail = {
   pokeApiId: 1,
   name: 'bulbasaur',
@@ -35,6 +38,7 @@ const local = {
   region: null,
   classificationTag: null,
   abilities: [],
+  capturedAt: '2026-08-14T00:00:00.000Z',
   createdAt: '2026-08-14T00:00:00.000Z',
   updatedAt: '2026-08-14T00:00:00.000Z',
 };
@@ -47,9 +51,104 @@ const createPokeApiClientMock = () => ({
 const createPokemonsRepositoryMock = () => ({
   upsertFromDetail: jest.fn(),
   findPage: jest.fn(),
+  findByPokeApiId: jest.fn(),
   update: jest.fn(),
   delete: jest.fn(),
 });
+
+/**
+ * In-memory fake with the same ownership semantics as the Drizzle adapter:
+ * pokemons are a shared replica keyed by pokeApiId; collection entries are
+ * unique per (userId, pokemonId) and every read/update/delete filters by
+ * userId. Used to test isolation and idempotency at the repository contract
+ * level without a live database.
+ */
+const createInMemoryRepository = () => {
+  const shared = new Map();
+  const entries = [];
+  let sequence = 0;
+
+  const nextId = () => {
+    sequence += 1;
+    return `00000000-0000-4000-8000-${String(sequence).padStart(12, '0')}`;
+  };
+
+  const toLocal = (entry) => {
+    const pokemon = shared.get(entry.pokeApiId);
+    return {
+      id: entry.id,
+      pokeApiId: pokemon.pokeApiId,
+      name: pokemon.name,
+      spriteUrl: pokemon.spriteUrl,
+      category: pokemon.category,
+      weight: pokemon.weight,
+      description: entry.description ?? pokemon.description,
+      localizedName: entry.localizedName,
+      region: entry.region,
+      classificationTag: entry.classificationTag,
+      abilities: pokemon.abilities,
+      capturedAt: entry.capturedAt.toISOString(),
+      createdAt: entry.createdAt.toISOString(),
+      updatedAt: entry.updatedAt.toISOString(),
+    };
+  };
+
+  return {
+    upsertFromDetail: async (userId, incoming) => {
+      shared.set(incoming.pokeApiId, incoming);
+      const existing = entries.find((entry) => entry.userId === userId && entry.pokeApiId === incoming.pokeApiId);
+      if (existing) {
+        existing.updatedAt = new Date();
+        return toLocal(existing);
+      }
+      const now = new Date();
+      const created = {
+        id: nextId(),
+        userId,
+        pokeApiId: incoming.pokeApiId,
+        localizedName: null,
+        region: null,
+        classificationTag: null,
+        description: null,
+        capturedAt: now,
+        createdAt: now,
+        updatedAt: now,
+      };
+      entries.push(created);
+      return toLocal(created);
+    },
+
+    findPage: async (userId, page, pageSize) => {
+      const mine = entries.filter((entry) => entry.userId === userId);
+      const offset = (page - 1) * pageSize;
+      return {
+        items: mine.slice(offset, offset + pageSize).map(toLocal),
+        page,
+        pageSize,
+        totalCount: mine.length,
+      };
+    },
+
+    findByPokeApiId: async (userId, pokeApiId) => {
+      const found = entries.find((entry) => entry.userId === userId && entry.pokeApiId === pokeApiId);
+      return found ? toLocal(found) : null;
+    },
+
+    update: async (userId, id, payload) => {
+      const found = entries.find((entry) => entry.userId === userId && entry.id === id);
+      if (!found) return null;
+      Object.assign(found, payload, { updatedAt: new Date() });
+      return toLocal(found);
+    },
+
+    delete: async (userId, id) => {
+      const index = entries.findIndex((entry) => entry.userId === userId && entry.id === id);
+      if (index === -1) return false;
+      entries.splice(index, 1);
+      return true;
+    },
+  };
+};
 
 describe('PokemonsService', () => {
   let pokeApiClient;
@@ -118,66 +217,166 @@ describe('PokemonsService', () => {
     await expect(service.getDetailByName('   ')).rejects.toBeInstanceOf(ValidationError);
   });
 
-  it('syncById fetches then upserts', async () => {
+  it('syncById fetches then upserts for the calling user', async () => {
     pokeApiClient.getPokemonDetail.mockResolvedValueOnce(detail);
     pokemonsRepository.upsertFromDetail.mockResolvedValueOnce(local);
 
-    const result = await service.syncById(1);
+    const result = await service.syncById(USER_A, 1);
 
-    expect(pokemonsRepository.upsertFromDetail).toHaveBeenCalledWith(detail);
+    expect(pokemonsRepository.upsertFromDetail).toHaveBeenCalledWith(USER_A, detail);
     expect(result).toBe(local);
   });
 
   it('syncByName does not upsert when the PokeAPI lookup misses', async () => {
     pokeApiClient.getPokemonDetail.mockResolvedValueOnce(null);
 
-    await expect(service.syncByName('missingno')).rejects.toBeInstanceOf(NotFoundError);
+    await expect(service.syncByName(USER_A, 'missingno')).rejects.toBeInstanceOf(NotFoundError);
     expect(pokemonsRepository.upsertFromDetail).not.toHaveBeenCalled();
   });
 
-  it('getLocal delegates with validated pagination', async () => {
+  it('getLocal delegates with the user id and validated pagination', async () => {
     const page = {
       items: [local], page: 1, pageSize: 20, totalCount: 1,
     };
     pokemonsRepository.findPage.mockResolvedValueOnce(page);
 
-    const result = await service.getLocal(1, 20);
+    const result = await service.getLocal(USER_A, 1, 20);
 
-    expect(pokemonsRepository.findPage).toHaveBeenCalledWith(1, 20);
+    expect(pokemonsRepository.findPage).toHaveBeenCalledWith(USER_A, 1, 20);
     expect(result).toBe(page);
 
-    await expect(service.getLocal(0, 20)).rejects.toBeInstanceOf(ValidationError);
+    await expect(service.getLocal(USER_A, 0, 20)).rejects.toBeInstanceOf(ValidationError);
+  });
+
+  it('getLocalByPokeApiId returns the entry, validates the id and 404s on miss', async () => {
+    pokemonsRepository.findByPokeApiId.mockResolvedValueOnce(local);
+
+    const result = await service.getLocalByPokeApiId(USER_A, 1);
+
+    expect(pokemonsRepository.findByPokeApiId).toHaveBeenCalledWith(USER_A, 1);
+    expect(result).toBe(local);
+
+    await expect(service.getLocalByPokeApiId(USER_A, 0)).rejects.toBeInstanceOf(ValidationError);
+    await expect(service.getLocalByPokeApiId(USER_A, 2.5)).rejects.toBeInstanceOf(ValidationError);
+
+    pokemonsRepository.findByPokeApiId.mockResolvedValueOnce(null);
+    await expect(service.getLocalByPokeApiId(USER_A, 99)).rejects.toThrow("Local pokemon with key '99' was not found");
   });
 
   it('update validates id format, payload shape and 404s on miss', async () => {
-    await expect(service.update('not-a-uuid', { region: 'Kanto' })).rejects.toBeInstanceOf(ValidationError);
-    await expect(service.update(local.id, {})).rejects.toBeInstanceOf(ValidationError);
-    await expect(service.update(local.id, { nickname: 'x' })).rejects.toBeInstanceOf(ValidationError);
-    await expect(service.update(local.id, { region: 'a'.repeat(501) })).rejects.toBeInstanceOf(ValidationError);
+    await expect(service.update(USER_A, 'not-a-uuid', { region: 'Kanto' })).rejects.toBeInstanceOf(ValidationError);
+    await expect(service.update(USER_A, local.id, {})).rejects.toBeInstanceOf(ValidationError);
+    await expect(service.update(USER_A, local.id, { nickname: 'x' })).rejects.toBeInstanceOf(ValidationError);
+    await expect(service.update(USER_A, local.id, { region: 'a'.repeat(501) })).rejects.toBeInstanceOf(ValidationError);
     expect(pokemonsRepository.update).not.toHaveBeenCalled();
 
     pokemonsRepository.update.mockResolvedValueOnce(null);
-    await expect(service.update(local.id, { region: 'Kanto' })).rejects.toBeInstanceOf(NotFoundError);
+    await expect(service.update(USER_A, local.id, { region: 'Kanto' })).rejects.toBeInstanceOf(NotFoundError);
 
     pokemonsRepository.update.mockResolvedValueOnce(local);
-    const result = await service.update(local.id, {
+    const result = await service.update(USER_A, local.id, {
       region: 'Kanto', localizedName: 'Bulbasaur', extra: 'ignored',
     });
 
-    expect(pokemonsRepository.update).toHaveBeenCalledWith(local.id, { region: 'Kanto', localizedName: 'Bulbasaur' });
+    expect(pokemonsRepository.update).toHaveBeenCalledWith(USER_A, local.id, { region: 'Kanto', localizedName: 'Bulbasaur' });
     expect(result).toBe(local);
   });
 
   it('remove validates the id and 404s on miss', async () => {
-    await expect(service.remove('not-a-uuid')).rejects.toBeInstanceOf(ValidationError);
+    await expect(service.remove(USER_A, 'not-a-uuid')).rejects.toBeInstanceOf(ValidationError);
     expect(pokemonsRepository.delete).not.toHaveBeenCalled();
 
     pokemonsRepository.delete.mockResolvedValueOnce(false);
-    await expect(service.remove(local.id)).rejects.toBeInstanceOf(NotFoundError);
+    await expect(service.remove(USER_A, local.id)).rejects.toBeInstanceOf(NotFoundError);
 
     pokemonsRepository.delete.mockResolvedValueOnce(true);
-    await service.remove(local.id);
+    await service.remove(USER_A, local.id);
 
-    expect(pokemonsRepository.delete).toHaveBeenCalledWith(local.id);
+    expect(pokemonsRepository.delete).toHaveBeenCalledWith(USER_A, local.id);
+  });
+});
+
+describe('PokemonsService with in-memory repository (ownership semantics)', () => {
+  let pokeApiClient;
+  let service;
+
+  beforeEach(() => {
+    pokeApiClient = createPokeApiClientMock();
+    pokeApiClient.getPokemonDetail.mockResolvedValue(detail);
+    service = createPokemonsService({ pokeApiClient, pokemonsRepository: createInMemoryRepository() });
+  });
+
+  it('re-syncing is idempotent: same entry id, no duplicates', async () => {
+    const first = await service.syncById(USER_A, 1);
+    const second = await service.syncById(USER_A, 1);
+
+    expect(second.id).toBe(first.id);
+    expect(second.capturedAt).toBe(first.capturedAt);
+
+    const mine = await service.getLocal(USER_A, 1, 20);
+    expect(mine.totalCount).toBe(1);
+    expect(mine.items).toHaveLength(1);
+  });
+
+  it('re-syncing preserves proprietary fields on the entry', async () => {
+    const entry = await service.syncById(USER_A, 1);
+    await service.update(USER_A, entry.id, { localizedName: 'Semillita' });
+
+    const resynced = await service.syncById(USER_A, 1);
+
+    expect(resynced.id).toBe(entry.id);
+    expect(resynced.localizedName).toBe('Semillita');
+  });
+
+  it('collections are isolated per user', async () => {
+    const entryA = await service.syncById(USER_A, 1);
+
+    const forB = await service.getLocal(USER_B, 1, 20);
+    expect(forB.totalCount).toBe(0);
+    expect(forB.items).toHaveLength(0);
+
+    await expect(service.getLocalByPokeApiId(USER_B, 1)).rejects.toBeInstanceOf(NotFoundError);
+    await expect(service.update(USER_B, entryA.id, { region: 'Kanto' })).rejects.toBeInstanceOf(NotFoundError);
+    await expect(service.remove(USER_B, entryA.id)).rejects.toBeInstanceOf(NotFoundError);
+
+    // A's entry is untouched by B's failed attempts.
+    const forA = await service.getLocal(USER_A, 1, 20);
+    expect(forA.totalCount).toBe(1);
+    expect(forA.items[0].id).toBe(entryA.id);
+    expect(forA.items[0].region).toBeNull();
+  });
+
+  it('both users can capture the same pokemon independently', async () => {
+    const entryA = await service.syncById(USER_A, 1);
+    const entryB = await service.syncById(USER_B, 1);
+
+    expect(entryB.id).not.toBe(entryA.id);
+
+    await service.update(USER_A, entryA.id, { localizedName: 'Semillita' });
+
+    const b = await service.getLocalByPokeApiId(USER_B, 1);
+    expect(b.localizedName).toBeNull();
+  });
+
+  it('getLocalByPokeApiId returns the caller entry with joined base fields', async () => {
+    const entry = await service.syncById(USER_A, 1);
+
+    const found = await service.getLocalByPokeApiId(USER_A, 1);
+
+    expect(found.id).toBe(entry.id);
+    expect(found.name).toBe('bulbasaur');
+    expect(found.description).toBe('A strange seed.');
+    expect(found.capturedAt).toBe(entry.capturedAt);
+  });
+
+  it('the entry description overrides the shared flavor text when set', async () => {
+    const entry = await service.syncById(USER_A, 1);
+
+    const updated = await service.update(USER_A, entry.id, { description: 'My own note.' });
+    expect(updated.description).toBe('My own note.');
+
+    // The shared pokemon keeps its flavor text for other users.
+    const entryB = await service.syncById(USER_B, 1);
+    expect(entryB.description).toBe('A strange seed.');
   });
 });

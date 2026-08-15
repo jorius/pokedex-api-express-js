@@ -39,6 +39,9 @@ const pokemons = pgTable('pokemons', {
   category: text('category'),
   weight: integer('weight'),
   description: text('description'),
+  // DEPRECATED (iteration two): per-user proprietary fields moved to
+  // collection_entries. These columns are kept nullable and unused to avoid a
+  // destructive migration on live data — do not read or write them.
   localizedName: text('localized_name'),
   region: text('region'),
   classificationTag: text('classification_tag'),
@@ -57,6 +60,28 @@ const pokemonAbilities = pgTable('pokemon_abilities', {
   uniqueIndex('pokemon_abilities_pokemon_id_slot_unique').on(table.pokemonId, table.slot),
 ]);
 
+/**
+ * Junction table: per-user ownership of shared pokemons plus the per-user
+ * proprietary fields (localizedName/region/classificationTag/description —
+ * the entry's description overrides the shared flavor text when set).
+ */
+const collectionEntries = pgTable('collection_entries', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  userId: uuid('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+  pokemonId: uuid('pokemon_id').notNull().references(() => pokemons.id, { onDelete: 'cascade' }),
+  localizedName: text('localized_name'),
+  region: text('region'),
+  classificationTag: text('classification_tag'),
+  description: text('description'),
+  capturedAt: timestamp('captured_at', { withTimezone: true }).notNull().defaultNow(),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+}, (table) => [
+  uniqueIndex('collection_entries_user_id_pokemon_id_unique').on(table.userId, table.pokemonId),
+  index('collection_entries_user_id_idx').on(table.userId),
+  index('collection_entries_pokemon_id_idx').on(table.pokemonId),
+]);
+
 export {
-  users, refreshTokens, pokemons, pokemonAbilities,
+  users, refreshTokens, pokemons, pokemonAbilities, collectionEntries,
 };

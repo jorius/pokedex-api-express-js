@@ -1,37 +1,45 @@
 // packages
 import {
-  asc, count, eq, inArray,
+  and, asc, count, eq, inArray,
 } from 'drizzle-orm';
 
 // database
 import { db } from '../database/Database.js';
-import { pokemonAbilities, pokemons } from '../database/Schema.js';
-
-/** Drizzle adapter for the pokemons + pokemon_abilities tables. */
+import { collectionEntries, pokemonAbilities, pokemons } from '../database/Schema.js';
 
 /**
- * @param {typeof pokemons.$inferSelect} row
+ * Drizzle adapter for the pokemons + pokemon_abilities + collection_entries
+ * tables. pokemons/pokemon_abilities form the shared PokeAPI replica cache;
+ * collection_entries carries per-user ownership and proprietary fields, and is
+ * the only table filtered by userId.
+ */
+
+/**
+ * @param {typeof collectionEntries.$inferSelect} entry
+ * @param {typeof pokemons.$inferSelect} pokemon
  * @param {{ name: string, slot: number, isHidden: boolean }[]} abilities
  * @returns {import('../../domain/types/Pokemon.types.js').LocalPokemon}
  */
-const toLocal = (row, abilities) => ({
-  id: row.id,
-  pokeApiId: row.pokeApiId,
-  name: row.name,
-  spriteUrl: row.spriteUrl,
-  category: row.category,
-  weight: row.weight,
-  description: row.description,
-  localizedName: row.localizedName,
-  region: row.region,
-  classificationTag: row.classificationTag,
+const toLocal = (entry, pokemon, abilities) => ({
+  id: entry.id,
+  pokeApiId: pokemon.pokeApiId,
+  name: pokemon.name,
+  spriteUrl: pokemon.spriteUrl,
+  category: pokemon.category,
+  weight: pokemon.weight,
+  // The entry's description is a per-user override of the shared flavor text.
+  description: entry.description ?? pokemon.description,
+  localizedName: entry.localizedName,
+  region: entry.region,
+  classificationTag: entry.classificationTag,
   abilities: abilities.map((ability) => ({
     name: ability.name,
     slot: ability.slot,
     isHidden: ability.isHidden,
   })),
-  createdAt: row.createdAt.toISOString(),
-  updatedAt: row.updatedAt.toISOString(),
+  capturedAt: entry.capturedAt.toISOString(),
+  createdAt: entry.createdAt.toISOString(),
+  updatedAt: entry.updatedAt.toISOString(),
 });
 
 /**
@@ -59,7 +67,7 @@ const abilitiesFor = async (pokemonIds) => {
  * @type {import('../../application/ports/PokemonsRepositoryPort.js').PokemonsRepositoryPort}
  */
 const pokemonsRepository = {
-  upsertFromDetail: async (detail) => db.transaction(async (tx) => {
+  upsertFromDetail: async (userId, detail) => db.transaction(async (tx) => {
     const [row] = await tx.insert(pokemons)
       .values({
         pokeApiId: detail.pokeApiId,
@@ -93,20 +101,35 @@ const pokemonsRepository = {
       })));
     }
 
-    return toLocal(row, detail.abilities);
+    // Idempotent capture: re-syncing refreshes the entry's updatedAt and
+    // returns the existing row (proprietary fields untouched), never duplicates.
+    const [entry] = await tx.insert(collectionEntries)
+      .values({ userId, pokemonId: row.id })
+      .onConflictDoUpdate({
+        target: [collectionEntries.userId, collectionEntries.pokemonId],
+        set: { updatedAt: new Date() },
+      })
+      .returning();
+
+    return toLocal(entry, row, detail.abilities);
   }),
 
-  findPage: async (page, pageSize) => {
+  findPage: async (userId, page, pageSize) => {
     const offset = (page - 1) * pageSize;
 
-    const rows = await db.select().from(pokemons)
+    const rows = await db.select({ entry: collectionEntries, pokemon: pokemons })
+      .from(collectionEntries)
+      .innerJoin(pokemons, eq(collectionEntries.pokemonId, pokemons.id))
+      .where(eq(collectionEntries.userId, userId))
       .orderBy(asc(pokemons.pokeApiId))
       .limit(pageSize)
       .offset(offset);
-    const [total] = await db.select({ value: count() }).from(pokemons);
+    const [total] = await db.select({ value: count() })
+      .from(collectionEntries)
+      .where(eq(collectionEntries.userId, userId));
 
-    const abilitiesByPokemonId = await abilitiesFor(rows.map((row) => row.id));
-    const items = rows.map((row) => toLocal(row, abilitiesByPokemonId.get(row.id) ?? []));
+    const abilitiesByPokemonId = await abilitiesFor(rows.map((row) => row.pokemon.id));
+    const items = rows.map((row) => toLocal(row.entry, row.pokemon, abilitiesByPokemonId.get(row.pokemon.id) ?? []));
 
     return {
       items,
@@ -116,22 +139,40 @@ const pokemonsRepository = {
     };
   },
 
-  update: async (id, payload) => {
-    const [row] = await db.update(pokemons)
-      .set({ ...payload, updatedAt: new Date() })
-      .where(eq(pokemons.id, id))
-      .returning();
+  findByPokeApiId: async (userId, pokeApiId) => {
+    const [row] = await db.select({ entry: collectionEntries, pokemon: pokemons })
+      .from(collectionEntries)
+      .innerJoin(pokemons, eq(collectionEntries.pokemonId, pokemons.id))
+      .where(and(eq(collectionEntries.userId, userId), eq(pokemons.pokeApiId, pokeApiId)))
+      .limit(1);
 
     if (!row) {
       return null;
     }
 
-    const abilities = (await abilitiesFor([row.id])).get(row.id) ?? [];
-    return toLocal(row, abilities);
+    const abilities = (await abilitiesFor([row.pokemon.id])).get(row.pokemon.id) ?? [];
+    return toLocal(row.entry, row.pokemon, abilities);
   },
 
-  delete: async (id) => {
-    const rows = await db.delete(pokemons).where(eq(pokemons.id, id)).returning({ id: pokemons.id });
+  update: async (userId, id, payload) => {
+    const [entry] = await db.update(collectionEntries)
+      .set({ ...payload, updatedAt: new Date() })
+      .where(and(eq(collectionEntries.id, id), eq(collectionEntries.userId, userId)))
+      .returning();
+
+    if (!entry) {
+      return null;
+    }
+
+    const [pokemon] = await db.select().from(pokemons).where(eq(pokemons.id, entry.pokemonId));
+    const abilities = (await abilitiesFor([entry.pokemonId])).get(entry.pokemonId) ?? [];
+    return toLocal(entry, pokemon, abilities);
+  },
+
+  delete: async (userId, id) => {
+    const rows = await db.delete(collectionEntries)
+      .where(and(eq(collectionEntries.id, id), eq(collectionEntries.userId, userId)))
+      .returning({ id: collectionEntries.id });
     return rows.length > 0;
   },
 };

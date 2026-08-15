@@ -79,31 +79,38 @@ const createPokemonsService = ({ pokeApiClient, pokemonsRepository }) => {
     return getDetail(normalized, normalized);
   };
 
-  const syncById = async (id) => pokemonsRepository.upsertFromDetail(await getDetailById(id));
+  const syncById = async (userId, id) => pokemonsRepository.upsertFromDetail(userId, await getDetailById(id));
 
-  const syncByName = async (name) => pokemonsRepository.upsertFromDetail(await getDetailByName(name));
+  const syncByName = async (userId, name) => pokemonsRepository.upsertFromDetail(userId, await getDetailByName(name));
 
-  const getLocal = async (page, pageSize) => {
+  const getLocal = async (userId, page, pageSize) => {
     validatePagination(page, pageSize);
-    return pokemonsRepository.findPage(page, pageSize);
+    return pokemonsRepository.findPage(userId, page, pageSize);
   };
 
-  const update = async (id, payload) => {
+  const getLocalByPokeApiId = async (userId, pokeApiId) => {
+    validatePokeApiId(pokeApiId);
+    const found = await pokemonsRepository.findByPokeApiId(userId, pokeApiId);
+    if (!found) throw new NotFoundError('Local pokemon', String(pokeApiId));
+    return found;
+  };
+
+  const update = async (userId, id, payload) => {
     validateLocalId(id);
     const sanitized = validateUpdatePayload(payload ?? {});
-    const updated = await pokemonsRepository.update(id, sanitized);
+    const updated = await pokemonsRepository.update(userId, id, sanitized);
     if (!updated) throw new NotFoundError('Local pokemon', id);
     return updated;
   };
 
-  const remove = async (id) => {
+  const remove = async (userId, id) => {
     validateLocalId(id);
-    const deleted = await pokemonsRepository.delete(id);
+    const deleted = await pokemonsRepository.delete(userId, id);
     if (!deleted) throw new NotFoundError('Local pokemon', id);
   };
 
   return {
-    browse, getDetailById, getDetailByName, syncById, syncByName, getLocal, update, remove,
+    browse, getDetailById, getDetailByName, syncById, syncByName, getLocal, getLocalByPokeApiId, update, remove,
   };
 };
 

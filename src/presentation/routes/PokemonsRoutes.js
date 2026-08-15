@@ -39,7 +39,9 @@ router.get('/', PokemonsController.browse);
  *   get:
  *     tags:
  *       - pokemons
- *     summary: Paginated listing of locally replicated Pokemon
+ *     summary: Paginated listing of the caller's Pokemon collection
+ *     security:
+ *       - bearerAuth: []
  *     parameters:
  *       - in: query
  *         name: page
@@ -51,9 +53,41 @@ router.get('/', PokemonsController.browse);
  *           type: integer
  *     responses:
  *       200:
- *         description: Paginated list of local Pokemon
+ *         description: Paginated list of the caller's collection entries
+ *       401:
+ *         description: Missing or invalid Bearer token
  */
-router.get('/local', PokemonsController.getLocal);
+router.get('/local', authenticate, PokemonsController.getLocal);
+
+/**
+ * @swagger
+ * /api/pokemons/local/by-poke-api-id/{pokeApiId}:
+ *   get:
+ *     tags:
+ *       - pokemons
+ *     summary: The caller's collection entry for a PokeAPI id (captured check)
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: pokeApiId
+ *         required: true
+ *         schema:
+ *           type: integer
+ *         description: PokeAPI numeric id
+ *     responses:
+ *       200:
+ *         description: The caller's collection entry for that PokeAPI id
+ *       400:
+ *         description: Non-numeric id
+ *       401:
+ *         description: Missing or invalid Bearer token
+ *       404:
+ *         description: The caller has not captured that Pokemon
+ */
+// Registered before the '/local/:id' routes: literal segments must win over
+// the param route, or 'by-poke-api-id' would be captured as a local id.
+router.get('/local/by-poke-api-id/:pokeApiId', authenticate, PokemonsController.getLocalByPokeApiId);
 
 /**
  * @swagger
@@ -153,7 +187,7 @@ router.post('/name/:name/sync', authenticate, PokemonsController.syncByName);
  *   put:
  *     tags:
  *       - pokemons
- *     summary: US-04 — Update a locally stored Pokemon
+ *     summary: US-04 — Update one of the caller's collection entries
  *     security:
  *       - bearerAuth: []
  *     parameters:
@@ -162,6 +196,7 @@ router.post('/name/:name/sync', authenticate, PokemonsController.syncByName);
  *         required: true
  *         schema:
  *           type: string
+ *         description: Collection entry id (uuid)
  *     requestBody:
  *       required: true
  *       content:
@@ -184,7 +219,7 @@ router.put('/local/:id', authenticate, PokemonsController.update);
  *   delete:
  *     tags:
  *       - pokemons
- *     summary: Delete a locally stored Pokemon
+ *     summary: Delete one of the caller's collection entries
  *     security:
  *       - bearerAuth: []
  *     parameters:
@@ -193,6 +228,7 @@ router.put('/local/:id', authenticate, PokemonsController.update);
  *         required: true
  *         schema:
  *           type: string
+ *         description: Collection entry id (uuid)
  *     responses:
  *       204:
  *         description: Pokemon deleted

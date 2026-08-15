@@ -36,7 +36,10 @@
  */
 
 /**
- * Locally replicated Pokemon with proprietary fields (US-03 & US-04).
+ * A Pokemon in the caller's collection (US-03 & US-04). `id` is the
+ * collection entry id; base fields come from the shared pokemons replica,
+ * proprietary fields from the caller's collection_entries row (the entry's
+ * description overrides the shared flavor text when set).
  *
  * @typedef {object} LocalPokemon
  * @property {string} id
@@ -50,6 +53,7 @@
  * @property {string|null} region
  * @property {string|null} classificationTag
  * @property {PokemonAbility[]} abilities
+ * @property {string} capturedAt
  * @property {string} createdAt
  * @property {string} updatedAt
  *

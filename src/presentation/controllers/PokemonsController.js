@@ -23,6 +23,10 @@ const parseNumericParam = (raw) => {
   return Number(raw);
 };
 
+// Local-collection routes sit behind the authenticate middleware, which
+// guarantees req.user is populated before these handlers run.
+const callerId = (req) => req.user.id;
+
 /** @param {{ page: number, pageSize: number, totalCount: number }} result */
 const toMeta = (result) => ({
   page: result.page,
@@ -60,7 +64,7 @@ const getDetailByName = async (req, res, next) => {
 
 const syncById = async (req, res, next) => {
   try {
-    res.status(201).json(ok(await pokemonsService.syncById(parseNumericParam(req.params.id))));
+    res.status(201).json(ok(await pokemonsService.syncById(callerId(req), parseNumericParam(req.params.id))));
   } catch (error) {
     next(error);
   }
@@ -68,7 +72,7 @@ const syncById = async (req, res, next) => {
 
 const syncByName = async (req, res, next) => {
   try {
-    res.status(201).json(ok(await pokemonsService.syncByName(req.params.name)));
+    res.status(201).json(ok(await pokemonsService.syncByName(callerId(req), req.params.name)));
   } catch (error) {
     next(error);
   }
@@ -78,8 +82,16 @@ const getLocal = async (req, res, next) => {
   try {
     const page = Number(req.query.page ?? 1);
     const pageSize = Number(req.query.pageSize ?? 20);
-    const result = await pokemonsService.getLocal(page, pageSize);
+    const result = await pokemonsService.getLocal(callerId(req), page, pageSize);
     res.json(ok(result.items, null, toMeta(result)));
+  } catch (error) {
+    next(error);
+  }
+};
+
+const getLocalByPokeApiId = async (req, res, next) => {
+  try {
+    res.json(ok(await pokemonsService.getLocalByPokeApiId(callerId(req), parseNumericParam(req.params.pokeApiId))));
   } catch (error) {
     next(error);
   }
@@ -87,7 +99,7 @@ const getLocal = async (req, res, next) => {
 
 const update = async (req, res, next) => {
   try {
-    res.json(ok(await pokemonsService.update(req.params.id, req.body)));
+    res.json(ok(await pokemonsService.update(callerId(req), req.params.id, req.body)));
   } catch (error) {
     next(error);
   }
@@ -95,7 +107,7 @@ const update = async (req, res, next) => {
 
 const remove = async (req, res, next) => {
   try {
-    await pokemonsService.remove(req.params.id);
+    await pokemonsService.remove(callerId(req), req.params.id);
     res.status(204).send();
   } catch (error) {
     next(error);
@@ -103,5 +115,5 @@ const remove = async (req, res, next) => {
 };
 
 export {
-  browse, getDetailById, getDetailByName, syncById, syncByName, getLocal, update, remove,
+  browse, getDetailById, getDetailByName, syncById, syncByName, getLocal, getLocalByPokeApiId, update, remove,
 };
