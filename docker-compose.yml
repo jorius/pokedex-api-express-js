@@ -1,3 +1,5 @@
+name: pokedex-api-express-js
+
 services:
   postgres:
     image: postgres:17-alpine
@@ -6,7 +8,10 @@ services:
       POSTGRES_USER: pokedex
       POSTGRES_PASSWORD: pokedex
     ports:
-      - "5432:5432"
+      # Three-way port allocation across the pokedex services: native PostgreSQL on the host
+      # owns 5432, the TS mirror's compose claims 5433, so this JS mirror takes 5434.
+      # In-network the api still reaches postgres via postgres:5432.
+      - "5434:5432"
     volumes:
       - pokedex-js-pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -14,6 +19,7 @@ services:
       interval: 5s
       timeout: 5s
       retries: 5
+    restart: unless-stopped
 
   api:
     build: .
@@ -22,12 +28,23 @@ services:
       PORT: "3000"
       DATABASE_URL: postgres://pokedex:pokedex@postgres:5432/pokedex
       POKEAPI_BASE_URL: https://pokeapi.co/api/v2
-      JWT_SECRET: CHANGE_ME__dev-only-secret
+      # Redis is shared infra owned by the TS mirror (see ../pokedex-api-express-ts/docker-compose.infra.yml),
+      # not started by this file. host.docker.internal resolves to the host, where infra publishes it on 6379.
+      REDIS_URL: redis://host.docker.internal:6379
+      JWT_SECRET: ${JWT_SECRET:-CHANGE_ME__dev-only-secret-at-least-32-chars}
+      JWT_ISSUER: pokedex-api
+      JWT_AUDIENCE: pokedex-clients
+      JWT_ACCESS_MINUTES: "15"
+      JWT_REFRESH_HOURS: "24"
+      BCRYPT_COST: "12"
+      CACHE_L1_TTL_SECONDS: "300"
+      CACHE_L2_TTL_SECONDS: "3600"
     ports:
       - "3000:3000"
     depends_on:
       postgres:
         condition: service_healthy
+    restart: unless-stopped
 
 volumes:
   pokedex-js-pgdata:

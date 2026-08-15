@@ -4,8 +4,7 @@ RESTful API translating the "Java - BLA - Technical Interview Exercise" to Node.
 Integrates with the external [PokeAPI](https://pokeapi.co/docs/v2), replicates Pokemon data into
 **PostgreSQL**, and exposes CRUD + auth endpoints documented with **Swagger**.
 
-> **Status: scaffolding only.** Layers, routes, Swagger and wiring are in place; business logic
-> is stubbed with `NotImplementedError` and `TODO` markers, intended to be implemented with TDD.
+> **Implementation complete — see the docs pass for full documentation.**
 
 ## Architecture
 
