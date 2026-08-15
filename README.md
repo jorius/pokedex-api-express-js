@@ -1,6 +1,6 @@
 # Pokedex API — Express + JavaScript
 
-RESTful Pokedex API built with **Express 5 + modern JavaScript (ESM)** on Node 22. It integrates with the external [PokeAPI](https://pokeapi.co/docs/v2), replicates Pokemon data on demand into a shared **PostgreSQL** database (Drizzle ORM), caches upstream reads through a **two-tier L1/L2 cache** (in-memory + optional Redis), and exposes CRUD + JWT auth endpoints documented with Swagger.
+RESTful Pokedex API built with **Express 5 + modern JavaScript (ESM)** on Node 22. It integrates with the external [PokeAPI](https://pokeapi.co/docs/v2), replicates Pokemon data on demand into a shared **PostgreSQL** database (Drizzle ORM), caches upstream reads through a **two-tier L1/L2 cache** (in-memory + optional Redis), and exposes CRUD + JWT auth endpoints — plus a **pokeball economy** (credits, a ball shop, a slots minigame and probabilistic catching) — documented with Swagger.
 
 This repo is the **plain-JavaScript mirror** of [`pokedex-api-express-ts`](../pokedex-api-express-ts): same clean architecture, same routes, same wire responses — with JSDoc typedefs standing in for TypeScript interfaces. Its key differentiator inside the ecosystem is also its key constraint: it is a **read-only schema mirror**. The database schema is owned by the TS repo; this repo queries the shared tables but never migrates them.
 
@@ -61,27 +61,28 @@ src/
 ├── Container.js                  # Composition root — wires every layer exactly once per process
 ├── domain/
 │   ├── errors/                   # HttpError hierarchy: ValidationError (400), UnauthorizedError (401), NotFoundError (404), ConflictError (409)
-│   └── types/                    # JSDoc typedefs: Api (envelope, paging), Pokemon, User
+│   ├── rules/                    # Pure, I/O-free game rules: Pagination limits; EconomyRules — prices, odds, payouts and the rolls
+│   └── types/                    # JSDoc typedefs: Api (envelope, paging), Pokemon, User, Economy
 ├── application/
 │   ├── ports/                    # JSDoc-typed contracts the services depend on: cache, PokeAPI gateway, repositories
-│   └── services/                 # AuthService, PokemonsService — all business rules, zero I/O
+│   └── services/                 # AuthService, PokemonsService, EconomyService — all business rules, zero I/O
 ├── infrastructure/
 │   ├── cache/                    # MemoryCache (L1 TTL map) and RedisCache (L2 — optional, fail-soft, warn-once)
 │   ├── clients/                  # PokeApiClient — singleton PokeAPI gateway wrapping the two-tier cache
 │   ├── config/                   # Env (dotenv + fail-fast validation), Logger
 │   ├── database/                 # pg Pool + Drizzle instance; Schema.js — READ-ONLY MIRROR of the TS repo's schema
 │   ├── lifecycle/                # GracefulShutdown: drain requests → close pg/Redis → exit
-│   └── repositories/             # Drizzle repositories: users, refresh tokens, pokemons
+│   └── repositories/             # Drizzle repositories: users, refresh tokens, pokemons, economy (wallet, balls, spins)
 └── presentation/
     ├── App.js                    # Express app factory: CORS, JSON, Swagger, routes, envelope 404, error handler
     ├── controllers/              # Thin HTTP handlers — parse, delegate, wrap in the envelope
     ├── middleware/               # Auth (JWT guard), Cors (permissive, token-auth rationale), ErrorHandler
-    ├── routes/                   # AuthRoutes, PokemonsRoutes
+    ├── routes/                   # AuthRoutes, PokemonsRoutes, EconomyRoutes
     ├── swagger/                  # swagger-jsdoc spec + reusable component schemas
     └── utils/                    # ok() / fail() envelope builders
 ```
 
-`repositories/` is one file per aggregate, not one per table: `PokemonsRepository.js` covers the shared `pokemons`/`pokemon_abilities` replica cache **and** the per-user `collection_entries` layer (ownership filtering, idempotent capture) described below.
+`repositories/` is one file per aggregate, not one per table: `PokemonsRepository.js` covers the shared `pokemons`/`pokemon_abilities` replica cache **and** the per-user `collection_entries` layer (ownership filtering, idempotent capture) described below. `EconomyRepository.js` likewise owns `wallets` + `ball_inventory` + `spin_results` as a single aggregate, because no credit or ball may move without the others settling in the same atomic step.
 
 ### The singleton PokeAPI client and the two-tier cache
 
@@ -112,6 +113,43 @@ flowchart LR
 
 See the [auth flow diagram](#auth-flow) below.
 
+### Pokeball economy (identical in all three backends)
+
+Catching is no longer free. Since this iteration a *sync* is a **catch attempt**: it costs a ball and it can fail. Every number below lives in exactly one place — [`src/domain/rules/EconomyRules.js`](src/domain/rules/EconomyRules.js), a module of pure functions over an injectable random source — and is mirrored verbatim by the TS and .NET services, so changing one of them is a cross-service contract change, not a local tweak.
+
+- **Starting kit:** every registration is granted **10000 credits** and **10 Poké Balls**, inserted in the *same transaction* as the `users` row ([`UsersRepository.js`](src/infrastructure/repositories/UsersRepository.js)) — an account can never exist without a wallet, and is playable immediately. Accounts created before the economy existed received the identical kit from the migration's backfill.
+- **Ball catalogue**, ordered cheapest first (the shop renders the array as-is, so the order is part of the contract):
+
+| Type | Name | Price | Base catch rate |
+|---|---|---|---|
+| `poke` | Poké Ball | 200 | 0.4 |
+| `great` | Great Ball | 600 | 0.6 |
+| `ultra` | Ultra Ball | 1200 | 0.8 |
+| `master` | Master Ball | 5000 | 1 (guaranteed) |
+
+- **Catch chance** = `clamp(base rate × rarity multiplier, 0.05, 1.0)`, rounded to **4 decimals** so all three services report the same float for the same throw. A **Master Ball short-circuits to 1.0** and ignores rarity entirely — it is the guaranteed catch the player paid 5000 credits for.
+
+| Rarity tier | Multiplier | Applies when |
+|---|---|---|
+| Legendary / Mythical | 0.35 | the species id is on the hard-coded list, gens I–IX (Ultra Beasts deliberately excluded — they are their own classification) |
+| Pseudo-legendary | 0.5 | base stat total ≥ 600 |
+| Strong | 0.75 | base stat total ≥ 500 |
+| Common | 1 | everything else, including an unknown stat line |
+
+- **Slots:** **100 credits** a spin, **three reels** drawn from a 21-entry pool (9 common species twice each + 3 legendaries once each, so a single reel lands legendary 1 time in 7). Weighting is expressed by repetition rather than a weight table, so "pick a uniformly random element" stays the whole algorithm in every language. Payouts are evaluated richest-first:
+
+| Outcome | Condition | Payout |
+|---|---|---|
+| `jackpot` | three legendaries, matching or not | 5000 |
+| `triple` | any three matching | 1000 |
+| `pair` | exactly two matching | 200 |
+| `none` | otherwise | 0 |
+
+Those weights give a jackpot ≈ 0.29 % of spins and a non-jackpot triple ≈ 0.78 %, for roughly a 70 % return to player.
+
+- **Every roll happens server-side** from `crypto.randomInt` — never `Math.random`: the odds are real money in credits, and a predictable PRNG would let a determined client anticipate rolls. The random source is injectable purely so tests can pin a roll.
+- **Every credit and ball movement is atomic.** Nothing is read and then written back: each debit is a single conditional `UPDATE ... WHERE credits >= cost` (or `WHERE quantity >= 1`) whose affected-row count *is* the verdict, with `CHECK` constraints on `wallets.credits` and `ball_inventory.quantity` as the database-level backstop. Two simultaneous purchases can never both pass a balance they cannot jointly afford.
+
 ## Prerequisites
 
 ### Required
@@ -120,7 +158,7 @@ See the [auth flow diagram](#auth-flow) below.
 |---|---|---|
 | Node.js | 22 (see [`.nvmrc`](.nvmrc)) | `nvm use` picks it up |
 | npm | bundled with Node 22 | lockfile is npm-format |
-| PostgreSQL | 14+ (native install) | **Only for DB-backed endpoints** (auth, sync, local CRUD). Browse/detail work with **no database at all** |
+| PostgreSQL | 14+ (native install) | **Only for DB-backed endpoints** (auth, catch/sync, local CRUD, wallet/shop/slots). Browse/detail and the ball catalogue work with **no database at all** |
 
 ### Optional
 
@@ -129,7 +167,7 @@ See the [auth flow diagram](#auth-flow) below.
 | Redis | L2 shared cache | Empty `REDIS_URL` → L1-only mode; Redis down → single warning, L1 + network continue |
 | Docker | `docker-compose.yml` (containerized API + its own Postgres); the shared Redis compose lives in the TS repo | Run everything natively |
 
-**Graceful degradation is a design rule:** nothing may assume Docker, Postgres, or Redis is running. Postgres being unreachable produces clear request-time errors on DB-backed endpoints, not a crash loop; `GET /api/pokemons` and the detail endpoints keep working because they only touch PokeAPI + cache.
+**Graceful degradation is a design rule:** nothing may assume Docker, Postgres, or Redis is running. Postgres being unreachable produces clear request-time errors on DB-backed endpoints, not a crash loop; `GET /api/pokemons` and the detail endpoints keep working because they only touch PokeAPI + cache, and `GET /api/economy/catalogue` keeps working because the prices are a rules-module constant, not a table.
 
 ## Configuration
 
@@ -168,7 +206,69 @@ CREATE ROLE pokedex LOGIN PASSWORD 'pokedex';
 CREATE DATABASE pokedex OWNER pokedex;
 ```
 
-The schema has five tables: `users`, `refresh_tokens`, `pokemons` + `pokemon_abilities` (a **shared** PokeAPI replica cache — `pokemons`' old proprietary columns, `localized_name`/`region`/`classification_tag`, are deprecated and unused now that per-user data lives elsewhere), and `collection_entries` — the per-user capture layer added this iteration: one row per `(user_id, pokemon_id)` (unique-constrained, indexed on both columns, cascade-deletes with either parent), carrying `localizedName`/`region`/`classificationTag`/`description` plus `capturedAt`/`createdAt`/`updatedAt`. A collection entry's `description` overrides the shared `pokemons.description` flavor text when set.
+The schema has eight tables (snake_case, uuid PKs via `gen_random_uuid()`, `timestamptz` timestamps): `users`, `refresh_tokens`, `pokemons` + `pokemon_abilities` (a **shared** PokeAPI replica cache — `pokemons`' old proprietary columns, `localized_name`/`region`/`classification_tag`, are deprecated and unused now that per-user data lives elsewhere), `collection_entries` — the per-user capture layer: one row per `(user_id, pokemon_id)` (unique-constrained, indexed on both columns, cascade-deletes with either parent), carrying `localizedName`/`region`/`classificationTag`/`description` plus `capturedAt`/`createdAt`/`updatedAt`; a collection entry's `description` overrides the shared `pokemons.description` flavor text when set — and the three **pokeball economy** tables added this iteration:
+
+| Table | Columns | Constraints and indexes |
+|---|---|---|
+| `wallets` | `id` uuid PK, `user_id` uuid NOT NULL, `credits` integer NOT NULL DEFAULT `10000`, `created_at`/`updated_at` timestamptz NOT NULL DEFAULT `now()` | `UNIQUE (user_id)` — exactly one authoritative row per user to lock and guard; `CHECK (credits >= 0)`; FK to `users` cascades on delete |
+| `ball_inventory` | `id` uuid PK, `user_id` uuid NOT NULL, `ball_type` text NOT NULL, `quantity` integer NOT NULL DEFAULT `0`, `created_at`/`updated_at` timestamptz NOT NULL DEFAULT `now()` | unique index on `(user_id, ball_type)` — one stack per type; index on `user_id`; `CHECK (quantity >= 0)`; FK to `users` cascades on delete |
+| `spin_results` | `id` uuid PK, `user_id` uuid NOT NULL, `reels` text NOT NULL (comma-joined PokeAPI ids, e.g. `'25,25,6'` — a text column keeps the three backends free of array-type mapping differences), `cost` integer NOT NULL, `payout` integer NOT NULL, `outcome` text NOT NULL, `created_at` timestamptz NOT NULL DEFAULT `now()` | index on `(user_id, created_at DESC)`; append-only audit trail that also serves the history endpoint; FK to `users` cascades on delete |
+
+```mermaid
+erDiagram
+    users ||--o{ collection_entries : owns
+    users ||--|| wallets : has
+    users ||--o{ ball_inventory : stocks
+    users ||--o{ spin_results : spun
+    pokemons ||--o{ collection_entries : "captured as"
+    pokemons ||--o{ pokemon_abilities : has
+
+    users {
+        uuid id PK
+    }
+    pokemons {
+        uuid id PK
+        int poke_api_id UK
+        text name
+        text description
+    }
+    pokemon_abilities {
+        uuid id PK
+        uuid pokemon_id FK
+        text name
+        int slot
+    }
+    collection_entries {
+        uuid id PK
+        uuid user_id FK
+        uuid pokemon_id FK
+        text localized_name
+        text region
+        text classification_tag
+        text description
+        timestamptz captured_at
+    }
+    wallets {
+        uuid id PK
+        uuid user_id FK
+        int credits
+    }
+    ball_inventory {
+        uuid id PK
+        uuid user_id FK
+        text ball_type
+        int quantity
+    }
+    spin_results {
+        uuid id PK
+        uuid user_id FK
+        text reels
+        int cost
+        int payout
+        text outcome
+        timestamptz created_at
+    }
+```
 
 ### Migrations do NOT run from this repo — ever
 
@@ -185,7 +285,7 @@ cd ../pokedex-api-express-ts
 npm run db:migrate
 ```
 
-If the schema ever changes, the change is made in the TS repo's `Schema.ts`, migrated from there, and then ported verbatim into this repo's `Schema.js` (the file's header comment restates this rule). This iteration's change — adding `collection_entries` and back-filling every pre-existing `pokemons` row to the oldest user account via an inserted `collection_entries` row (`CROSS JOIN` against `users ORDER BY created_at ASC LIMIT 1`) — landed as [`drizzle/0001_polite_violations.sql`](../pokedex-api-express-ts/drizzle/0001_polite_violations.sql) in the TS repo; this repo only received the ported `Schema.js` change above, never the migration itself.
+If the schema ever changes, the change is made in the TS repo's `Schema.ts`, migrated from there, and then ported verbatim into this repo's `Schema.js` (the file's header comment restates this rule). The previous iteration's change — adding `collection_entries` and back-filling every pre-existing `pokemons` row to the oldest user account via an inserted `collection_entries` row (`CROSS JOIN` against `users ORDER BY created_at ASC LIMIT 1`) — landed as [`drizzle/0001_polite_violations.sql`](../pokedex-api-express-ts/drizzle/0001_polite_violations.sql). This iteration's — the three economy tables plus a hand-written, idempotent backfill that grandfathers every *existing* account into the economy with the same starting kit a new registration receives (10000 credits and 10 Poké Balls, `ON CONFLICT DO NOTHING` so a re-run is a no-op; captured collection entries are left untouched) — landed as [`drizzle/0002_absurd_black_bird.sql`](../pokedex-api-express-ts/drizzle/0002_absurd_black_bird.sql). This repo only ever received the ported `Schema.js` changes, never the migrations themselves.
 
 ## Running
 
@@ -230,15 +330,15 @@ This starts the API on 3000 plus a dedicated Postgres published on **5434** (nat
 
 ## API surface
 
-Lowercase URLs. Lookups by id and by name are **separate endpoints** (RESTful style rule: one route per identifier type). `page`/`pageSize` query params; `meta` carries `page`, `pageSize`, `totalCount`, `totalPages`.
+Lowercase URLs. Lookups by id and by name are **separate endpoints** (RESTful style rule: one route per identifier type). `page`/`pageSize` query params (defaults 1 and 20; `pageSize` is capped at 100, anything outside → 400); `meta` carries `page`, `pageSize`, `totalCount`, `totalPages`.
 
 | Method | Path | Auth | Description |
 |---|---|---|---|
 | GET | `/api/pokemons` | — | Paginated browse straight from PokeAPI (sprite, name, category, weight, abilities) |
 | GET | `/api/pokemons/{id}` | — | Detail by numeric PokeAPI id (stats, description, types, evolution chain) |
 | GET | `/api/pokemons/name/{name}` | — | Detail by name |
-| POST | `/api/pokemons/{id}/sync` | Bearer | Upsert the shared `pokemons` cache (by `poke_api_id`) and capture it into the caller's collection — 201. Idempotent: re-syncing an already-captured Pokemon returns the same collection entry, `capturedAt` unchanged, `updatedAt` bumped |
-| POST | `/api/pokemons/name/{name}/sync` | Bearer | Same, by name — 201, same idempotent-capture semantics |
+| POST | `/api/pokemons/{id}/sync` | Bearer | **Catch attempt.** Optional `ballType` (JSON body *or* query string; omitted, `null` or blank → `poke`). One ball is consumed on **every** throw, hit or miss, re-catch included — **201 when caught**, **200 when it escaped**. A landed throw upserts the shared `pokemons` cache (by `poke_api_id`) and captures it into the caller's collection; capture stays idempotent, so re-catching returns the same collection entry with `capturedAt` unchanged and `updatedAt` bumped. Unknown ball type → 400 (rejected before any I/O, nothing spent); Pokemon not in PokeAPI → 404 (no ball consumed); none of that ball left → 409 |
+| POST | `/api/pokemons/name/{name}/sync` | Bearer | Same, by name — same ball cost, status split and error cases |
 | GET | `/api/pokemons/local` | Bearer | Paginated listing of the **caller's** collection entries only |
 | GET | `/api/pokemons/local/by-poke-api-id/{pokeApiId}` | Bearer | The caller's collection entry for a PokeAPI id — 404 if the caller hasn't captured it (powers the frontend's "captured" check) |
 | PUT | `/api/pokemons/local/{id}` | Bearer | Edit the caller's collection entry — `{id}` is the **collection entry id**, not the pokemon id: `localizedName`, `region`, `classificationTag`, `description` (invalid → 400; missing or owned by another user → 404) |
@@ -247,6 +347,11 @@ Lowercase URLs. Lookups by id and by name are **separate endpoints** (RESTful st
 | POST | `/api/auth/login` | — | Returns user + access + refresh tokens |
 | POST | `/api/auth/refresh` | — | Body: `{ "refreshToken": "..." }` — rotates the token |
 | POST | `/api/auth/logout` | Bearer | Revokes the presented token's family |
+| GET | `/api/economy/catalogue` | — | The four ball types cheapest first (`type`, `name`, `price`, `catchRate`). **Public on purpose** so the shop can render its prices before anyone logs in |
+| GET | `/api/economy/wallet` | Bearer | The caller's `credits` plus `balls[]` — always **all four** types in catalogue order, `quantity: 0` for types never owned, so clients need no merge against the catalogue (no wallet row → 404) |
+| POST | `/api/economy/shop/buy` | Bearer | Body `{ "ballType": "great", "quantity": 5 }` — debits `price × quantity` and credits the stack atomically, returns the updated wallet — **200** (unknown ball type, or a `quantity` that is not an integer in **1..99** → 400; insufficient credits → 409 `Not enough credits`, nothing changed) |
+| POST | `/api/economy/slots/spin` | Bearer | No body. Costs **100 credits**, rolls three reels server-side, settles cost and payout in one arithmetic expression and records the spin — **200** with `{ reels, outcome, payout, wallet }` (insufficient credits → 409 `Not enough credits`, nothing recorded) |
+| GET | `/api/economy/slots/history` | Bearer | The caller's spins, most recent first (`id` breaks timestamp ties so paging is deterministic) — paginated `{ id, reels, cost, payout, outcome, createdAt }` |
 
 ### Response envelope
 
@@ -270,7 +375,7 @@ Every response — success, error, even the 404 catch-all — uses the same shap
 }
 ```
 
-A collection entry (`GET /api/pokemons/local`, `GET /api/pokemons/local/by-poke-api-id/{pokeApiId}`, sync responses, `PUT /api/pokemons/local/{id}`) adds the entry id, the caller's proprietary fields, and `capturedAt`:
+A collection entry (`GET /api/pokemons/local`, `GET /api/pokemons/local/by-poke-api-id/{pokeApiId}`, `PUT /api/pokemons/local/{id}`, and — nested under `entry` — a successful catch) adds the entry id, the caller's proprietary fields, and `capturedAt`:
 
 ```json
 {
@@ -298,6 +403,47 @@ A collection entry (`GET /api/pokemons/local`, `GET /api/pokemons/local/by-poke-
 }
 ```
 
+A catch attempt (both sync routes) reports the throw itself — the ball that was spent, what is left of that stack, the chance the server rolled against, and the collection entry, which is `null` when the Pokemon escaped. The example below is a Poké Ball thrown at a legendary (`0.4 × 0.35 = 0.14`) that got away, so the status is **200**; a landed throw is **201** with `"caught": true` and the entry in place of `null`:
+
+```json
+{
+  "data": {
+    "caught": false,
+    "ballType": "poke",
+    "remainingBalls": 7,
+    "chance": 0.14,
+    "entry": null
+  },
+  "error": null,
+  "msg": null,
+  "meta": null
+}
+```
+
+A spin carries the reels, the outcome, the payout and the wallet as it stands after settling. `GET /api/economy/wallet` and `POST /api/economy/shop/buy` return that same wallet object directly as `data`:
+
+```json
+{
+  "data": {
+    "reels": [25, 25, 6],
+    "outcome": "pair",
+    "payout": 200,
+    "wallet": {
+      "credits": 9500,
+      "balls": [
+        { "type": "poke", "quantity": 7 },
+        { "type": "great", "quantity": 1 },
+        { "type": "ultra", "quantity": 0 },
+        { "type": "master", "quantity": 0 }
+      ]
+    }
+  },
+  "error": null,
+  "msg": null,
+  "meta": null
+}
+```
+
 ```json
 {
   "data": null,
@@ -316,7 +462,7 @@ sequenceDiagram
     participant DB as PostgreSQL
 
     C->>S: POST /api/auth/register (email, password)
-    S->>DB: INSERT user (bcrypt $2b$, cost 12)
+    S->>DB: INSERT user (bcrypt $2b$, cost 12) + wallet (10000 credits) + 10 Poke Balls, one transaction
     S-->>C: 201 user + access JWT (15 min) + refresh token R1
 
     C->>S: POST /api/auth/login
@@ -347,7 +493,7 @@ npm test           # Jest (ESM via --experimental-vm-modules)
 npm run lint       # ESLint — airbnb-base
 ```
 
-**11 suites, 89 tests** — the same coverage targets as the TS reference, ported test by test (the TS repo's suite currently reports the identical 11/89): auth flows including rotation and reuse detection, cache tiering, graceful shutdown, env validation, middleware behavior, and per-user collection ownership (idempotent capture, isolation between users, ownership-filtered update/delete, deterministic slot-ordered abilities). All unit-level with mocked repositories and PokeAPI client; no live infrastructure required.
+**13 suites, 153 tests** — the same coverage targets as the TS reference, ported test by test (the TS repo's suite currently reports the identical 13/153): auth flows including rotation and reuse detection, cache tiering, graceful shutdown, env validation, middleware behavior, per-user collection ownership (idempotent capture, isolation between users, ownership-filtered update/delete, deterministic slot-ordered abilities), and the pokeball economy — the catalogue, the rarity and catch-chance arithmetic including its clamp band, the weighted reel pool and payout table, wallet arithmetic across runs of spins, and the catch flow (a ball spent on hit and miss alike, 409 once the stack runs out, nothing spent on a 400 or a 404). All unit-level with mocked repositories, an in-memory economy/collection double and a mocked PokeAPI client; the rolls are pinned through the injected random source, so no live infrastructure and no luck is required.
 
 ## Troubleshooting
 
@@ -360,6 +506,9 @@ npm run lint       # ESLint — airbnb-base
 | Ctrl+C / signals on Windows | Windows has no POSIX signals; Node synthesizes `SIGINT` for Ctrl+C in a console, and `SIGTERM` from outside is not deliverable. To exercise graceful shutdown programmatically on Windows, trigger the handler in-process (`process.emit('SIGINT')`) |
 | `EADDRINUSE` on 3000 | Another instance (native or compose) already owns the port — see the [port allocation table](#ecosystem-port-allocation) |
 | Tables don't exist / relation errors | Migrations were never applied — run them **from the TS repo** (`cd ../pokedex-api-express-ts && npm run db:migrate`), never from here |
+| `409 Not enough credits` from the shop or the slots | Working as designed: the debit is a guarded conditional `UPDATE`, so an unaffordable purchase or spin changes nothing at all rather than half-applying |
+| `409 No Poké Ball left` (or Great/Ultra/Master) from a sync | The catch routes consume a ball on **every** throw, hit or miss. Buy more with `POST /api/economy/shop/buy`, or win credits at `POST /api/economy/slots/spin` |
+| `404 Wallet with key '<uuid>' was not found` | The account has no `wallets` row, so it predates the economy and never got the `0002` backfill. Apply the migrations from the TS repo — the backfill is idempotent and safe to re-run |
 
 ## Ecosystem siblings
 
