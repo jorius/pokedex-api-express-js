@@ -81,6 +81,8 @@ src/
     └── utils/                    # ok() / fail() envelope builders
 ```
 
+`repositories/` is one file per aggregate, not one per table: `PokemonsRepository.js` covers the shared `pokemons`/`pokemon_abilities` replica cache **and** the per-user `collection_entries` layer (ownership filtering, idempotent capture) described below.
+
 ### The singleton PokeAPI client and the two-tier cache
 
 The external PokeAPI is consumed through exactly one client instance per process (ESM modules evaluate once, so the container is a natural singleton — documented in the client's doc comment). The client caches **assembled results** (list pages, full detail objects), not raw upstream responses:
@@ -155,6 +157,8 @@ cp .env.example .env
 
 **Why the MUST-MATCH rows matter:** the three backends share one `users` table and one token contract. If `JWT_SECRET`, issuer, or audience diverge, a token issued by one service is rejected by another; if `BCRYPT_COST` diverges, hashes still verify (cost is embedded in the hash) but new registrations become inconsistent with the ecosystem contract. The 32-character minimum exists because .NET's IdentityModel rejects shorter HS256 keys — the limit is enforced everywhere so any service can mint tokens for all.
 
+**Verified live this iteration:** a token minted by any one of the three backends is accepted by the other two against the shared Postgres database. The .NET repo now supplies its dev `JWT_SECRET` via `dotnet user-secrets` instead of the placeholder committed in its `appsettings.Development.json`; if that secret drifts from this repo's `.env` value, tokens stop verifying across services in both directions (see that repo's README for its own secret-setup steps).
+
 ## Database setup
 
 PostgreSQL is installed **natively** by the owner (compose Postgres is an alternative, below). One database, one schema (`public`), shared by all three backends. Create the role and database once:
@@ -163,6 +167,8 @@ PostgreSQL is installed **natively** by the owner (compose Postgres is an altern
 CREATE ROLE pokedex LOGIN PASSWORD 'pokedex';
 CREATE DATABASE pokedex OWNER pokedex;
 ```
+
+The schema has five tables: `users`, `refresh_tokens`, `pokemons` + `pokemon_abilities` (a **shared** PokeAPI replica cache — `pokemons`' old proprietary columns, `localized_name`/`region`/`classification_tag`, are deprecated and unused now that per-user data lives elsewhere), and `collection_entries` — the per-user capture layer added this iteration: one row per `(user_id, pokemon_id)` (unique-constrained, indexed on both columns, cascade-deletes with either parent), carrying `localizedName`/`region`/`classificationTag`/`description` plus `capturedAt`/`createdAt`/`updatedAt`. A collection entry's `description` overrides the shared `pokemons.description` flavor text when set.
 
 ### Migrations do NOT run from this repo — ever
 
@@ -179,7 +185,7 @@ cd ../pokedex-api-express-ts
 npm run db:migrate
 ```
 
-If the schema ever changes, the change is made in the TS repo's `Schema.ts`, migrated from there, and then ported verbatim into this repo's `Schema.js` (the file's header comment restates this rule).
+If the schema ever changes, the change is made in the TS repo's `Schema.ts`, migrated from there, and then ported verbatim into this repo's `Schema.js` (the file's header comment restates this rule). This iteration's change — adding `collection_entries` and back-filling every pre-existing `pokemons` row to the oldest user account via an inserted `collection_entries` row (`CROSS JOIN` against `users ORDER BY created_at ASC LIMIT 1`) — landed as [`drizzle/0001_polite_violations.sql`](../pokedex-api-express-ts/drizzle/0001_polite_violations.sql) in the TS repo; this repo only received the ported `Schema.js` change above, never the migration itself.
 
 ## Running
 
@@ -231,11 +237,12 @@ Lowercase URLs. Lookups by id and by name are **separate endpoints** (RESTful st
 | GET | `/api/pokemons` | — | Paginated browse straight from PokeAPI (sprite, name, category, weight, abilities) |
 | GET | `/api/pokemons/{id}` | — | Detail by numeric PokeAPI id (stats, description, types, evolution chain) |
 | GET | `/api/pokemons/name/{name}` | — | Detail by name |
-| POST | `/api/pokemons/{id}/sync` | Bearer | Replicate into PostgreSQL (upsert by `poke_api_id`) — 201 |
-| POST | `/api/pokemons/name/{name}/sync` | Bearer | Same, by name — 201 |
-| GET | `/api/pokemons/local` | — | Paginated local replicas |
-| PUT | `/api/pokemons/local/{id}` | Bearer | Edit proprietary fields: `localizedName`, `region`, `classificationTag`, `description` (invalid → 400, missing → 404) |
-| DELETE | `/api/pokemons/local/{id}` | Bearer | Delete a replica — 204 (missing → 404) |
+| POST | `/api/pokemons/{id}/sync` | Bearer | Upsert the shared `pokemons` cache (by `poke_api_id`) and capture it into the caller's collection — 201. Idempotent: re-syncing an already-captured Pokemon returns the same collection entry, `capturedAt` unchanged, `updatedAt` bumped |
+| POST | `/api/pokemons/name/{name}/sync` | Bearer | Same, by name — 201, same idempotent-capture semantics |
+| GET | `/api/pokemons/local` | Bearer | Paginated listing of the **caller's** collection entries only |
+| GET | `/api/pokemons/local/by-poke-api-id/{pokeApiId}` | Bearer | The caller's collection entry for a PokeAPI id — 404 if the caller hasn't captured it (powers the frontend's "captured" check) |
+| PUT | `/api/pokemons/local/{id}` | Bearer | Edit the caller's collection entry — `{id}` is the **collection entry id**, not the pokemon id: `localizedName`, `region`, `classificationTag`, `description` (invalid → 400; missing or owned by another user → 404) |
+| DELETE | `/api/pokemons/local/{id}` | Bearer | Delete one of the caller's collection entries (`{id}` = entry id) — 204 (missing or owned by another user → 404) |
 | POST | `/api/auth/register` | — | Email + password (min 8 chars) — 201 with session; duplicate email → 409 |
 | POST | `/api/auth/login` | — | Returns user + access + refresh tokens |
 | POST | `/api/auth/refresh` | — | Body: `{ "refreshToken": "..." }` — rotates the token |
@@ -260,6 +267,34 @@ Every response — success, error, even the 404 catch-all — uses the same shap
   "error": null,
   "msg": null,
   "meta": { "page": 1, "pageSize": 1, "totalCount": 1350, "totalPages": 1350 }
+}
+```
+
+A collection entry (`GET /api/pokemons/local`, `GET /api/pokemons/local/by-poke-api-id/{pokeApiId}`, sync responses, `PUT /api/pokemons/local/{id}`) adds the entry id, the caller's proprietary fields, and `capturedAt`:
+
+```json
+{
+  "data": [
+    {
+      "id": "4b36c8a7-3d61-4bfe-a437-95b3ef1478f6",
+      "pokeApiId": 1,
+      "name": "bulbasaur",
+      "spriteUrl": "https://raw.githubusercontent.com/PokeAPI/sprites/.../1.png",
+      "category": "Seed Pokémon",
+      "weight": 69,
+      "description": "A strange seed.",
+      "localizedName": null,
+      "region": null,
+      "classificationTag": null,
+      "abilities": [{ "name": "overgrow", "slot": 1, "isHidden": false }],
+      "capturedAt": "2026-08-14T00:00:00.000Z",
+      "createdAt": "2026-08-14T00:00:00.000Z",
+      "updatedAt": "2026-08-14T00:00:00.000Z"
+    }
+  ],
+  "error": null,
+  "msg": null,
+  "meta": { "page": 1, "pageSize": 1, "totalCount": 1, "totalPages": 1 }
 }
 ```
 
@@ -312,7 +347,7 @@ npm test           # Jest (ESM via --experimental-vm-modules)
 npm run lint       # ESLint — airbnb-base
 ```
 
-**11 suites, 81 tests** — the same coverage targets as the TS reference, ported test by test: auth flows including rotation and reuse detection, cache tiering, graceful shutdown, env validation, middleware behavior. All unit-level with mocked repositories and PokeAPI client; no live infrastructure required.
+**11 suites, 89 tests** — the same coverage targets as the TS reference, ported test by test (the TS repo's suite currently reports the identical 11/89): auth flows including rotation and reuse detection, cache tiering, graceful shutdown, env validation, middleware behavior, and per-user collection ownership (idempotent capture, isolation between users, ownership-filtered update/delete, deterministic slot-ordered abilities). All unit-level with mocked repositories and PokeAPI client; no live infrastructure required.
 
 ## Troubleshooting
 
