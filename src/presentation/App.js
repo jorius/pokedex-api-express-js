@@ -8,6 +8,7 @@ import { swaggerSpec } from './swagger/Swagger.js';
 
 // routes
 import authRoutes from './routes/AuthRoutes.js';
+import economyRoutes from './routes/EconomyRoutes.js';
 import pokemonsRoutes from './routes/PokemonsRoutes.js';
 
 // middleware
@@ -29,6 +30,7 @@ const createApp = () => {
 
   app.use('/api/pokemons', pokemonsRoutes);
   app.use('/api/auth', authRoutes);
+  app.use('/api/economy', economyRoutes);
 
   // Unknown routes still get the standard response envelope, not Express's default HTML.
   app.use((_req, res) => {

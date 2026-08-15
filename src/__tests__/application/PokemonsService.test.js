@@ -6,11 +6,16 @@ import {
 // services
 import { createPokemonsService } from '../../application/services/PokemonsService.js';
 // utils
+import { ConflictError } from '../../domain/errors/ConflictError.js';
 import { NotFoundError } from '../../domain/errors/NotFoundError.js';
 import { ValidationError } from '../../domain/errors/ValidationError.js';
 
 const USER_A = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
 const USER_B = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+
+/** Rolls that force a deterministic outcome: 0 always catches, ~1 always escapes. */
+const ALWAYS_CATCHES = () => 0;
+const ALWAYS_ESCAPES = () => 0.9999999;
 
 const detail = {
   pokeApiId: 1,
@@ -46,6 +51,28 @@ const shuffledAbilitiesDetail = {
   evolutionChain: ['squirtle', 'wartortle', 'blastoise'],
 };
 
+// A legendary with a real base stat total (680): rarity ×0.35 regardless of BST.
+const legendaryDetail = {
+  pokeApiId: 150,
+  name: 'mewtwo',
+  spriteUrl: 'mewtwo.png',
+  category: 'Genetic Pokémon',
+  weight: 1220,
+  height: 20,
+  description: 'Created by genetic manipulation.',
+  types: ['psychic'],
+  abilities: [{ name: 'pressure', slot: 1, isHidden: false }],
+  stats: [
+    { name: 'hp', value: 106 },
+    { name: 'attack', value: 110 },
+    { name: 'defense', value: 90 },
+    { name: 'special-attack', value: 154 },
+    { name: 'special-defense', value: 90 },
+    { name: 'speed', value: 130 },
+  ],
+  evolutionChain: ['mewtwo'],
+};
+
 const local = {
   id: '4b36c8a7-3d61-4bfe-a437-95b3ef1478f6',
   pokeApiId: 1,
@@ -75,6 +102,34 @@ const createPokemonsRepositoryMock = () => ({
   update: jest.fn(),
   delete: jest.fn(),
 });
+
+/**
+ * Ball ledger stand-in for the catch flow. Only consumeBall matters here — the
+ * rest of the economy port is exercised by EconomyService.test.js — and it
+ * keeps the adapter's guard semantics: null when there is nothing to consume.
+ */
+const createFakeBallLedger = (stock = { poke: 10 }) => {
+  const held = new Map(Object.entries(stock));
+  const consumed = [];
+
+  return {
+    stock: held,
+    consumed,
+    consumeBall: async (_userId, ballType) => {
+      const remaining = held.get(ballType) ?? 0;
+      if (remaining < 1) return null;
+      held.set(ballType, remaining - 1);
+      consumed.push(ballType);
+      return remaining - 1;
+    },
+    getWallet: async () => null,
+    purchase: async () => null,
+    applySpin: async () => null,
+    findSpinPage: async () => ({
+      items: [], page: 1, pageSize: 20, totalCount: 0,
+    }),
+  };
+};
 
 /**
  * In-memory fake with the same ownership semantics as the Drizzle adapter:
@@ -176,12 +231,19 @@ const createInMemoryRepository = () => {
 describe('PokemonsService', () => {
   let pokeApiClient;
   let pokemonsRepository;
+  let economyRepository;
   let service;
 
   beforeEach(() => {
     pokeApiClient = createPokeApiClientMock();
     pokemonsRepository = createPokemonsRepositoryMock();
-    service = createPokemonsService({ pokeApiClient, pokemonsRepository });
+    economyRepository = createFakeBallLedger();
+    service = createPokemonsService({
+      pokeApiClient,
+      pokemonsRepository,
+      economyRepository,
+      random: ALWAYS_CATCHES,
+    });
   });
 
   it('browse delegates to the PokeAPI client', async () => {
@@ -247,14 +309,17 @@ describe('PokemonsService', () => {
     const result = await service.syncById(USER_A, 1);
 
     expect(pokemonsRepository.upsertFromDetail).toHaveBeenCalledWith(USER_A, detail);
-    expect(result).toBe(local);
+    expect(result.caught).toBe(true);
+    expect(result.entry).toBe(local);
   });
 
-  it('syncByName does not upsert when the PokeAPI lookup misses', async () => {
+  it('syncByName does not upsert when the PokeAPI lookup misses, and costs no ball', async () => {
     pokeApiClient.getPokemonDetail.mockResolvedValueOnce(null);
 
     await expect(service.syncByName(USER_A, 'missingno')).rejects.toBeInstanceOf(NotFoundError);
     expect(pokemonsRepository.upsertFromDetail).not.toHaveBeenCalled();
+    expect(economyRepository.consumed).toEqual([]);
+    expect(economyRepository.stock.get('poke')).toBe(10);
   });
 
   it('getLocal delegates with the user id and validated pagination', async () => {
@@ -323,17 +388,30 @@ describe('PokemonsService with in-memory repository (ownership semantics)', () =
   let pokeApiClient;
   let service;
 
+  // These tests are about ownership, not odds: the roll is pinned to always
+  // catch and the ball ledger is stocked deep enough that no test runs dry.
+  const capture = async (userId, id) => {
+    const result = await service.syncById(userId, id);
+    expect(result.caught).toBe(true);
+    return result.entry;
+  };
+
   beforeEach(() => {
     pokeApiClient = createPokeApiClientMock();
     pokeApiClient.getPokemonDetail.mockImplementation(
       async (idOrName) => (idOrName === '7' ? shuffledAbilitiesDetail : detail),
     );
-    service = createPokemonsService({ pokeApiClient, pokemonsRepository: createInMemoryRepository() });
+    service = createPokemonsService({
+      pokeApiClient,
+      pokemonsRepository: createInMemoryRepository(),
+      economyRepository: createFakeBallLedger({ poke: 100 }),
+      random: ALWAYS_CATCHES,
+    });
   });
 
   it('re-syncing is idempotent: same entry id, no duplicates', async () => {
-    const first = await service.syncById(USER_A, 1);
-    const second = await service.syncById(USER_A, 1);
+    const first = await capture(USER_A, 1);
+    const second = await capture(USER_A, 1);
 
     expect(second.id).toBe(first.id);
     expect(second.capturedAt).toBe(first.capturedAt);
@@ -344,17 +422,17 @@ describe('PokemonsService with in-memory repository (ownership semantics)', () =
   });
 
   it('re-syncing preserves proprietary fields on the entry', async () => {
-    const entry = await service.syncById(USER_A, 1);
+    const entry = await capture(USER_A, 1);
     await service.update(USER_A, entry.id, { localizedName: 'Semillita' });
 
-    const resynced = await service.syncById(USER_A, 1);
+    const resynced = await capture(USER_A, 1);
 
     expect(resynced.id).toBe(entry.id);
     expect(resynced.localizedName).toBe('Semillita');
   });
 
   it('collections are isolated per user', async () => {
-    const entryA = await service.syncById(USER_A, 1);
+    const entryA = await capture(USER_A, 1);
 
     const forB = await service.getLocal(USER_B, 1, 20);
     expect(forB.totalCount).toBe(0);
@@ -372,8 +450,8 @@ describe('PokemonsService with in-memory repository (ownership semantics)', () =
   });
 
   it('both users can capture the same pokemon independently', async () => {
-    const entryA = await service.syncById(USER_A, 1);
-    const entryB = await service.syncById(USER_B, 1);
+    const entryA = await capture(USER_A, 1);
+    const entryB = await capture(USER_B, 1);
 
     expect(entryB.id).not.toBe(entryA.id);
 
@@ -384,7 +462,7 @@ describe('PokemonsService with in-memory repository (ownership semantics)', () =
   });
 
   it('getLocalByPokeApiId returns the caller entry with joined base fields', async () => {
-    const entry = await service.syncById(USER_A, 1);
+    const entry = await capture(USER_A, 1);
 
     const found = await service.getLocalByPokeApiId(USER_A, 1);
 
@@ -395,23 +473,167 @@ describe('PokemonsService with in-memory repository (ownership semantics)', () =
   });
 
   it('the entry description overrides the shared flavor text when set', async () => {
-    const entry = await service.syncById(USER_A, 1);
+    const entry = await capture(USER_A, 1);
 
     const updated = await service.update(USER_A, entry.id, { description: 'My own note.' });
     expect(updated.description).toBe('My own note.');
 
     // The shared pokemon keeps its flavor text for other users.
-    const entryB = await service.syncById(USER_B, 1);
+    const entryB = await capture(USER_B, 1);
     expect(entryB.description).toBe('A strange seed.');
   });
 
   it('abilities come back slot-ordered even when the source array is shuffled', async () => {
-    const synced = await service.syncById(USER_A, 7);
+    const synced = await capture(USER_A, 7);
     expect(synced.abilities.map((a) => a.slot)).toEqual([1, 2, 3]);
     expect(synced.abilities.map((a) => a.name)).toEqual(['torrent', 'shell-armor', 'rain-dish']);
 
     // A later read agrees with the fresh sync, not just the sync response itself.
     const found = await service.getLocalByPokeApiId(USER_A, 7);
     expect(found.abilities.map((a) => a.slot)).toEqual([1, 2, 3]);
+  });
+});
+
+describe('PokemonsService catch flow (iteration three)', () => {
+  let pokeApiClient;
+  let pokemonsRepository;
+  let economyRepository;
+
+  const build = (random, stock) => {
+    economyRepository = createFakeBallLedger(stock);
+    return createPokemonsService({
+      pokeApiClient,
+      pokemonsRepository,
+      economyRepository,
+      random,
+    });
+  };
+
+  beforeEach(() => {
+    pokeApiClient = createPokeApiClientMock();
+    pokemonsRepository = createPokemonsRepositoryMock();
+    pokeApiClient.getPokemonDetail.mockImplementation(async (idOrName) => (
+      idOrName === '150' || idOrName === 'mewtwo' ? legendaryDetail : detail
+    ));
+    pokemonsRepository.upsertFromDetail.mockResolvedValue(local);
+  });
+
+  it('consumes a ball and creates the entry when the throw lands', async () => {
+    const service = build(ALWAYS_CATCHES);
+
+    const result = await service.syncById(USER_A, 1);
+
+    expect(result).toEqual({
+      caught: true, ballType: 'poke', remainingBalls: 9, chance: 0.4, entry: local,
+    });
+    expect(economyRepository.consumed).toEqual(['poke']);
+    expect(pokemonsRepository.upsertFromDetail).toHaveBeenCalledTimes(1);
+  });
+
+  it('consumes a ball and creates NO entry when the pokemon escapes', async () => {
+    const service = build(ALWAYS_ESCAPES);
+
+    const result = await service.syncById(USER_A, 1);
+
+    expect(result).toEqual({
+      caught: false, ballType: 'poke', remainingBalls: 9, chance: 0.4, entry: null,
+    });
+    expect(economyRepository.consumed).toEqual(['poke']);
+    expect(economyRepository.stock.get('poke')).toBe(9);
+    expect(pokemonsRepository.upsertFromDetail).not.toHaveBeenCalled();
+  });
+
+  it('spends a ball per attempt until the stock runs out, then 409s', async () => {
+    const service = build(ALWAYS_ESCAPES, { poke: 2 });
+
+    expect((await service.syncById(USER_A, 1)).remainingBalls).toBe(1);
+    expect((await service.syncById(USER_A, 1)).remainingBalls).toBe(0);
+
+    await expect(service.syncById(USER_A, 1)).rejects.toBeInstanceOf(ConflictError);
+    await expect(service.syncById(USER_A, 1)).rejects.toThrow('No Poké Ball left');
+    expect(economyRepository.consumed).toHaveLength(2);
+  });
+
+  it('names the missing ball type in the 409', async () => {
+    const service = build(ALWAYS_CATCHES, { poke: 1 });
+
+    await expect(service.syncById(USER_A, 1, 'great')).rejects.toThrow('No Great Ball left');
+    await expect(service.syncById(USER_A, 1, 'ultra')).rejects.toThrow('No Ultra Ball left');
+    await expect(service.syncByName(USER_A, 'bulbasaur', 'master')).rejects.toThrow('No Master Ball left');
+    expect(economyRepository.consumed).toEqual([]);
+  });
+
+  it('defaults an omitted, null or blank ballType to the starter Poké Ball', async () => {
+    const service = build(ALWAYS_CATCHES);
+
+    expect((await service.syncById(USER_A, 1)).ballType).toBe('poke');
+    expect((await service.syncById(USER_A, 1, null)).ballType).toBe('poke');
+    expect((await service.syncById(USER_A, 1, '')).ballType).toBe('poke');
+    expect((await service.syncByName(USER_A, 'bulbasaur', undefined)).ballType).toBe('poke');
+    expect(economyRepository.consumed).toEqual(['poke', 'poke', 'poke', 'poke']);
+  });
+
+  it('throws the ball the caller picked, and only that one', async () => {
+    const service = build(ALWAYS_CATCHES, { poke: 5, ultra: 2 });
+
+    const result = await service.syncById(USER_A, 1, 'ultra');
+
+    expect(result.ballType).toBe('ultra');
+    expect(result.chance).toBe(0.8);
+    expect(result.remainingBalls).toBe(1);
+    expect(economyRepository.stock.get('poke')).toBe(5);
+    expect(economyRepository.consumed).toEqual(['ultra']);
+  });
+
+  it('rejects an unknown ball type with 400 before any lookup or spend', async () => {
+    const service = build(ALWAYS_CATCHES);
+
+    await expect(service.syncById(USER_A, 1, 'luxury')).rejects.toBeInstanceOf(ValidationError);
+    await expect(service.syncByName(USER_A, 'bulbasaur', 'POKE')).rejects.toThrow("'POKE' is not a valid ball type");
+
+    expect(pokeApiClient.getPokemonDetail).not.toHaveBeenCalled();
+    expect(economyRepository.consumed).toEqual([]);
+  });
+
+  it('applies the pokemon rarity to the reported chance', async () => {
+    const service = build(ALWAYS_CATCHES, { poke: 5, great: 5, master: 5 });
+
+    expect((await service.syncById(USER_A, 150)).chance).toBe(0.14);
+    expect((await service.syncById(USER_A, 150, 'great')).chance).toBe(0.21);
+    expect((await service.syncByName(USER_A, 'mewtwo', 'master')).chance).toBe(1);
+  });
+
+  it('never lets a Master Ball fail, whatever the roll', async () => {
+    const service = build(() => 0.9999999, { master: 1 });
+
+    const result = await service.syncById(USER_A, 150, 'master');
+
+    expect(result.caught).toBe(true);
+    expect(result.chance).toBe(1);
+    expect(result.entry).toBe(local);
+  });
+
+  it('escapes a legendary with a Poké Ball on a roll just above the chance', async () => {
+    const service = build(() => 0.15);
+
+    const result = await service.syncById(USER_A, 150);
+
+    expect(result.chance).toBe(0.14);
+    expect(result.caught).toBe(false);
+    expect(result.entry).toBeNull();
+    // The ball is gone either way.
+    expect(economyRepository.stock.get('poke')).toBe(9);
+  });
+
+  it('costs nothing when the pokemon does not exist', async () => {
+    pokeApiClient.getPokemonDetail.mockReset();
+    pokeApiClient.getPokemonDetail.mockResolvedValue(null);
+    const service = build(ALWAYS_CATCHES);
+
+    await expect(service.syncById(USER_A, 9999)).rejects.toBeInstanceOf(NotFoundError);
+    await expect(service.syncByName(USER_A, 'missingno')).rejects.toBeInstanceOf(NotFoundError);
+
+    expect(economyRepository.consumed).toEqual([]);
+    expect(economyRepository.stock.get('poke')).toBe(10);
   });
 });

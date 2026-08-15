@@ -2,7 +2,7 @@
 import { pokemonsService } from '../../Container.js';
 // utils
 import { ValidationError } from '../../domain/errors/ValidationError.js';
-import { ok } from '../utils/Response.js';
+import { ok, toPagedMeta } from '../utils/Response.js';
 
 /**
  * Thin HTTP layer — no business logic, delegates to PokemonsService.
@@ -27,20 +27,16 @@ const parseNumericParam = (raw) => {
 // guarantees req.user is populated before these handlers run.
 const callerId = (req) => req.user.id;
 
-/** @param {{ page: number, pageSize: number, totalCount: number }} result */
-const toMeta = (result) => ({
-  page: result.page,
-  pageSize: result.pageSize,
-  totalCount: result.totalCount,
-  totalPages: result.pageSize > 0 ? Math.ceil(result.totalCount / result.pageSize) : 0,
-});
+// The catch routes accept `ballType` from either the JSON body or the query
+// string, so a plain fetch and a curl one-liner can both pick a ball.
+const ballTypeFrom = (req) => req.body?.ballType ?? req.query.ballType;
 
 const browse = async (req, res, next) => {
   try {
     const page = Number(req.query.page ?? 1);
     const pageSize = Number(req.query.pageSize ?? 20);
     const result = await pokemonsService.browse(page, pageSize);
-    res.json(ok(result.items, null, toMeta(result)));
+    res.json(ok(result.items, null, toPagedMeta(result)));
   } catch (error) {
     next(error);
   }
@@ -62,9 +58,15 @@ const getDetailByName = async (req, res, next) => {
   }
 };
 
+// 201 when the pokemon was caught (an entry was created), 200 when it escaped:
+// the request itself succeeded and consumed a ball, there is just no new
+// resource to point at. All three services must agree on this split.
+const catchStatus = (caught) => (caught ? 201 : 200);
+
 const syncById = async (req, res, next) => {
   try {
-    res.status(201).json(ok(await pokemonsService.syncById(callerId(req), parseNumericParam(req.params.id))));
+    const result = await pokemonsService.syncById(callerId(req), parseNumericParam(req.params.id), ballTypeFrom(req));
+    res.status(catchStatus(result.caught)).json(ok(result));
   } catch (error) {
     next(error);
   }
@@ -72,7 +74,8 @@ const syncById = async (req, res, next) => {
 
 const syncByName = async (req, res, next) => {
   try {
-    res.status(201).json(ok(await pokemonsService.syncByName(callerId(req), req.params.name)));
+    const result = await pokemonsService.syncByName(callerId(req), req.params.name, ballTypeFrom(req));
+    res.status(catchStatus(result.caught)).json(ok(result));
   } catch (error) {
     next(error);
   }
@@ -83,7 +86,7 @@ const getLocal = async (req, res, next) => {
     const page = Number(req.query.page ?? 1);
     const pageSize = Number(req.query.pageSize ?? 20);
     const result = await pokemonsService.getLocal(callerId(req), page, pageSize);
-    res.json(ok(result.items, null, toMeta(result)));
+    res.json(ok(result.items, null, toPagedMeta(result)));
   } catch (error) {
     next(error);
   }

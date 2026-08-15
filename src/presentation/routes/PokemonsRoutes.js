@@ -141,7 +141,11 @@ router.get('/:id', PokemonsController.getDetailById);
  *   post:
  *     tags:
  *       - pokemons
- *     summary: US-03 — Replicate a Pokemon (by PokeAPI id) into the local PostgreSQL store
+ *     summary: US-03 — Catch a Pokemon (by PokeAPI id) into the caller's collection
+ *     description: >
+ *       Costs one ball of the chosen type (default poke), consumed whether the throw lands or the
+ *       pokemon escapes. The catch chance is rolled server-side from the ball's base rate and the
+ *       pokemon's rarity. 201 when caught (an entry was created), 200 when it escaped.
  *     security:
  *       - bearerAuth: []
  *     parameters:
@@ -150,11 +154,29 @@ router.get('/:id', PokemonsController.getDetailById);
  *         required: true
  *         schema:
  *           type: integer
+ *       - in: query
+ *         name: ballType
+ *         schema:
+ *           type: string
+ *           enum: [poke, great, ultra, master]
+ *         description: Alternative to the request body
+ *     requestBody:
+ *       required: false
+ *       content:
+ *         application/json:
+ *           schema:
+ *             $ref: '#/components/schemas/CatchDto'
  *     responses:
+ *       200:
+ *         description: The pokemon escaped — a ball was consumed, no entry created
  *       201:
- *         description: Pokemon replicated locally
+ *         description: Pokemon caught and replicated locally
+ *       400:
+ *         description: Unknown ball type
  *       404:
- *         description: Pokemon not found in PokeAPI
+ *         description: Pokemon not found in PokeAPI (no ball is consumed)
+ *       409:
+ *         description: No balls of that type left
  */
 router.post('/:id/sync', authenticate, PokemonsController.syncById);
 
@@ -164,7 +186,11 @@ router.post('/:id/sync', authenticate, PokemonsController.syncById);
  *   post:
  *     tags:
  *       - pokemons
- *     summary: US-03 — Replicate a Pokemon (by name) into the local PostgreSQL store
+ *     summary: US-03 — Catch a Pokemon (by name) into the caller's collection
+ *     description: >
+ *       Costs one ball of the chosen type (default poke), consumed whether the throw lands or the
+ *       pokemon escapes. The catch chance is rolled server-side from the ball's base rate and the
+ *       pokemon's rarity. 201 when caught (an entry was created), 200 when it escaped.
  *     security:
  *       - bearerAuth: []
  *     parameters:
@@ -173,11 +199,29 @@ router.post('/:id/sync', authenticate, PokemonsController.syncById);
  *         required: true
  *         schema:
  *           type: string
+ *       - in: query
+ *         name: ballType
+ *         schema:
+ *           type: string
+ *           enum: [poke, great, ultra, master]
+ *         description: Alternative to the request body
+ *     requestBody:
+ *       required: false
+ *       content:
+ *         application/json:
+ *           schema:
+ *             $ref: '#/components/schemas/CatchDto'
  *     responses:
+ *       200:
+ *         description: The pokemon escaped — a ball was consumed, no entry created
  *       201:
- *         description: Pokemon replicated locally
+ *         description: Pokemon caught and replicated locally
+ *       400:
+ *         description: Unknown ball type
  *       404:
- *         description: Pokemon not found in PokeAPI
+ *         description: Pokemon not found in PokeAPI (no ball is consumed)
+ *       409:
+ *         description: No balls of that type left
  */
 router.post('/name/:name/sync', authenticate, PokemonsController.syncByName);
 

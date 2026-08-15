@@ -1,4 +1,10 @@
+// rules
+import {
+  DEFAULT_BALL_TYPE, ballName, baseStatTotal, catchChance, isBallType, rollCatch, secureRandom,
+} from '../../domain/rules/EconomyRules.js';
+import { validatePagination } from '../../domain/rules/Pagination.js';
 // utils
+import { ConflictError } from '../../domain/errors/ConflictError.js';
 import { NotFoundError } from '../../domain/errors/NotFoundError.js';
 import { ValidationError } from '../../domain/errors/ValidationError.js';
 
@@ -6,18 +12,31 @@ import { ValidationError } from '../../domain/errors/ValidationError.js';
  * Business logic for the four Pokemon user stories. Lookup by id and by name
  * are separate operations (RESTful: one route per identifier type); the
  * internal PokeAPI gateway accepts either.
+ *
+ * Since iteration three a "sync" is a CATCH ATTEMPT: it costs a ball and only
+ * writes a collection entry when the server-rolled throw succeeds. That is why
+ * this service depends on the economy repository — the ball ledger and the
+ * collection are two halves of one user action, and neither the odds nor the
+ * roll are ever exposed to the caller.
+ *
+ * @typedef {import('../../domain/types/Economy.types.js').BallType} BallType
+ * @typedef {import('../../domain/types/Economy.types.js').CatchResult} CatchResult
  */
 
-const MAX_PAGE_SIZE = 100;
 const MAX_FIELD_LENGTH = 500;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const EDITABLE_FIELDS = ['localizedName', 'region', 'classificationTag', 'description'];
 
-const validatePagination = (page, pageSize) => {
-  if (!Number.isInteger(page) || page < 1) throw new ValidationError('page must be an integer >= 1');
-  if (!Number.isInteger(pageSize) || pageSize < 1 || pageSize > MAX_PAGE_SIZE) {
-    throw new ValidationError(`pageSize must be an integer between 1 and ${MAX_PAGE_SIZE}`);
-  }
+/**
+ * An omitted (or blank) ballType means the starter Poké Ball, not a rejection.
+ *
+ * @param {*} ballType
+ * @returns {BallType}
+ */
+const validateBallType = (ballType) => {
+  if (ballType === undefined || ballType === null || ballType === '') return DEFAULT_BALL_TYPE;
+  if (!isBallType(ballType)) throw new ValidationError(`'${String(ballType)}' is not a valid ball type`);
+  return ballType;
 };
 
 const validatePokeApiId = (id) => {
@@ -54,8 +73,13 @@ const validateUpdatePayload = (payload) => {
  * @param {object} deps
  * @param {import('../ports/PokeApiPort.js').PokeApiPort} deps.pokeApiClient
  * @param {import('../ports/PokemonsRepositoryPort.js').PokemonsRepositoryPort} deps.pokemonsRepository
+ * @param {import('../ports/EconomyRepositoryPort.js').EconomyRepositoryPort} deps.economyRepository
+ * @param {import('../../domain/rules/EconomyRules.js').RandomSource} [deps.random]
+ *   Injectable so tests can force a catch or an escape; production uses the crypto-backed default.
  */
-const createPokemonsService = ({ pokeApiClient, pokemonsRepository }) => {
+const createPokemonsService = ({
+  pokeApiClient, pokemonsRepository, economyRepository, random = secureRandom,
+}) => {
   const getDetail = async (idOrName, label) => {
     const found = await pokeApiClient.getPokemonDetail(idOrName);
     if (!found) throw new NotFoundError('Pokemon', label);
@@ -79,9 +103,42 @@ const createPokemonsService = ({ pokeApiClient, pokemonsRepository }) => {
     return getDetail(normalized, normalized);
   };
 
-  const syncById = async (userId, id) => pokemonsRepository.upsertFromDetail(userId, await getDetailById(id));
+  /**
+   * One catch attempt. Ordering is deliberate and part of the contract:
+   *   1. the ball type is validated before any I/O — a bad one is a 400 that
+   *      costs nothing;
+   *   2. the pokemon is resolved next, so a 404 never costs the player a ball;
+   *   3. the ball is then consumed atomically, and is spent whether the throw
+   *      lands or the pokemon escapes;
+   *   4. the chance is computed from the ball and the pokemon's own rarity, and
+   *      the roll happens here on the server;
+   *   5. only a successful throw upserts a collection entry — an escape writes
+   *      nothing and reports `entry: null`.
+   *
+   * @returns {Promise<CatchResult>}
+   */
+  const attemptCatch = async (userId, detail, ballType) => {
+    const remainingBalls = await economyRepository.consumeBall(userId, ballType);
+    if (remainingBalls === null) throw new ConflictError(`No ${ballName(ballType)} left`);
 
-  const syncByName = async (userId, name) => pokemonsRepository.upsertFromDetail(userId, await getDetailByName(name));
+    const chance = catchChance(ballType, detail.pokeApiId, baseStatTotal(detail.stats));
+    const caught = rollCatch(chance, random);
+    const entry = caught ? await pokemonsRepository.upsertFromDetail(userId, detail) : null;
+
+    return {
+      caught, ballType, remainingBalls, chance, entry,
+    };
+  };
+
+  const syncById = async (userId, id, ballType) => {
+    const type = validateBallType(ballType);
+    return attemptCatch(userId, await getDetailById(id), type);
+  };
+
+  const syncByName = async (userId, name, ballType) => {
+    const type = validateBallType(ballType);
+    return attemptCatch(userId, await getDetailByName(name), type);
+  };
 
   const getLocal = async (userId, page, pageSize) => {
     validatePagination(page, pageSize);

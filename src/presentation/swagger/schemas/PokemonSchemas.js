@@ -63,6 +63,31 @@
  *         refreshToken:
  *           type: string
  *           description: Opaque refresh token issued at login/register/refresh
+ *     CatchDto:
+ *       type: object
+ *       description: Optional body for the catch (sync) routes — ballType may also be passed as a query parameter.
+ *       properties:
+ *         ballType:
+ *           type: string
+ *           enum: [poke, great, ultra, master]
+ *           default: poke
+ *           description: Which ball to throw. Consumed whether the catch succeeds or the pokemon escapes.
+ *           example: great
+ *     BuyBallsDto:
+ *       type: object
+ *       required:
+ *         - ballType
+ *         - quantity
+ *       properties:
+ *         ballType:
+ *           type: string
+ *           enum: [poke, great, ultra, master]
+ *           example: great
+ *         quantity:
+ *           type: integer
+ *           minimum: 1
+ *           maximum: 99
+ *           example: 5
  */
 
 export {};

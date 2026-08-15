@@ -7,11 +7,13 @@ import { createRedisCache } from './infrastructure/cache/RedisCache.js';
 // clients
 import { createPokeApiClient } from './infrastructure/clients/PokeApiClient.js';
 // repositories
+import { economyRepository } from './infrastructure/repositories/EconomyRepository.js';
 import { pokemonsRepository } from './infrastructure/repositories/PokemonsRepository.js';
 import { refreshTokensRepository } from './infrastructure/repositories/RefreshTokensRepository.js';
 import { usersRepository } from './infrastructure/repositories/UsersRepository.js';
 // services
 import { createAuthService } from './application/services/AuthService.js';
+import { createEconomyService } from './application/services/EconomyService.js';
 import { createPokemonsService } from './application/services/PokemonsService.js';
 
 /**
@@ -32,6 +34,11 @@ const pokeApiClient = createPokeApiClient({
 });
 
 const authService = createAuthService({ usersRepository, refreshTokensRepository, env });
-const pokemonsService = createPokemonsService({ pokeApiClient, pokemonsRepository });
+// Both services leave `random` at its default: the crypto-backed source in the
+// rules module. Only tests ever inject a deterministic one.
+const economyService = createEconomyService({ economyRepository });
+const pokemonsService = createPokemonsService({ pokeApiClient, pokemonsRepository, economyRepository });
 
-export { authService, pokemonsService, redisCache };
+export {
+  authService, economyService, pokemonsService, redisCache,
+};
