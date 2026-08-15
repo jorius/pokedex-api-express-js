@@ -3,12 +3,14 @@ import { Router } from 'express';
 
 // controllers
 import * as AuthController from '../controllers/AuthController.js';
+// middleware
+import { authenticate } from '../middleware/Auth.js';
 
 const router = Router();
 
 /**
  * @swagger
- * /api/v1/auth/register:
+ * /api/auth/register:
  *   post:
  *     tags:
  *       - auth
@@ -31,7 +33,7 @@ router.post('/register', AuthController.register);
 
 /**
  * @swagger
- * /api/v1/auth/login:
+ * /api/auth/login:
  *   post:
  *     tags:
  *       - auth
@@ -49,5 +51,51 @@ router.post('/register', AuthController.register);
  *         description: Invalid credentials
  */
 router.post('/login', AuthController.login);
+
+/**
+ * @swagger
+ * /api/auth/refresh:
+ *   post:
+ *     tags:
+ *       - auth
+ *     summary: Rotate a refresh token for a new access/refresh token pair
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             $ref: '#/components/schemas/RefreshDto'
+ *     responses:
+ *       200:
+ *         description: Token pair rotated
+ *       400:
+ *         description: Validation failed
+ *       401:
+ *         description: Invalid, expired or reused refresh token
+ */
+router.post('/refresh', AuthController.refresh);
+
+/**
+ * @swagger
+ * /api/auth/logout:
+ *   post:
+ *     tags:
+ *       - auth
+ *     summary: Revoke the refresh token family tied to the given token
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             $ref: '#/components/schemas/RefreshDto'
+ *     responses:
+ *       200:
+ *         description: Logged out
+ *       401:
+ *         description: Missing or invalid access token
+ */
+router.post('/logout', authenticate, AuthController.logout);
 
 export default router;

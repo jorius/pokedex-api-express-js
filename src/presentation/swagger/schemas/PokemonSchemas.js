@@ -55,6 +55,14 @@
  *         password:
  *           type: string
  *           example: PikaPika123!
+ *     RefreshDto:
+ *       type: object
+ *       required:
+ *         - refreshToken
+ *       properties:
+ *         refreshToken:
+ *           type: string
+ *           description: Opaque refresh token issued at login/register/refresh
  */
 
 export {};

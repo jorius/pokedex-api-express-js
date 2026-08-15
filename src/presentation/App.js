@@ -12,6 +12,8 @@ import pokemonsRoutes from './routes/PokemonsRoutes.js';
 
 // middleware
 import { errorHandler } from './middleware/ErrorHandler.js';
+// utils
+import { fail } from './utils/Response.js';
 
 const createApp = () => {
   const app = express();
@@ -23,8 +25,13 @@ const createApp = () => {
     app.use('/api/docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec));
   }
 
-  app.use('/api/v1/pokemons', pokemonsRoutes);
-  app.use('/api/v1/auth', authRoutes);
+  app.use('/api/pokemons', pokemonsRoutes);
+  app.use('/api/auth', authRoutes);
+
+  // Unknown routes still get the standard response envelope, not Express's default HTML.
+  app.use((_req, res) => {
+    res.status(404).json(fail('NotFound', 'Route not found'));
+  });
 
   app.use(errorHandler);
 

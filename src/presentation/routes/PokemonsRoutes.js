@@ -5,13 +5,13 @@ import { Router } from 'express';
 import * as PokemonsController from '../controllers/PokemonsController.js';
 
 // middleware
-import { requireAuth } from '../middleware/Auth.js';
+import { authenticate } from '../middleware/Auth.js';
 
 const router = Router();
 
 /**
  * @swagger
- * /api/v1/pokemons:
+ * /api/pokemons:
  *   get:
  *     tags:
  *       - pokemons
@@ -35,7 +35,7 @@ router.get('/', PokemonsController.browse);
 
 /**
  * @swagger
- * /api/v1/pokemons/local:
+ * /api/pokemons/local:
  *   get:
  *     tags:
  *       - pokemons
@@ -57,7 +57,7 @@ router.get('/local', PokemonsController.getLocal);
 
 /**
  * @swagger
- * /api/v1/pokemons/name/{name}:
+ * /api/pokemons/name/{name}:
  *   get:
  *     tags:
  *       - pokemons
@@ -79,7 +79,7 @@ router.get('/name/:name', PokemonsController.getDetailByName);
 
 /**
  * @swagger
- * /api/v1/pokemons/{id}:
+ * /api/pokemons/{id}:
  *   get:
  *     tags:
  *       - pokemons
@@ -103,7 +103,7 @@ router.get('/:id', PokemonsController.getDetailById);
 
 /**
  * @swagger
- * /api/v1/pokemons/{id}/sync:
+ * /api/pokemons/{id}/sync:
  *   post:
  *     tags:
  *       - pokemons
@@ -122,11 +122,11 @@ router.get('/:id', PokemonsController.getDetailById);
  *       404:
  *         description: Pokemon not found in PokeAPI
  */
-router.post('/:id/sync', requireAuth, PokemonsController.syncById);
+router.post('/:id/sync', authenticate, PokemonsController.syncById);
 
 /**
  * @swagger
- * /api/v1/pokemons/name/{name}/sync:
+ * /api/pokemons/name/{name}/sync:
  *   post:
  *     tags:
  *       - pokemons
@@ -145,11 +145,11 @@ router.post('/:id/sync', requireAuth, PokemonsController.syncById);
  *       404:
  *         description: Pokemon not found in PokeAPI
  */
-router.post('/name/:name/sync', requireAuth, PokemonsController.syncByName);
+router.post('/name/:name/sync', authenticate, PokemonsController.syncByName);
 
 /**
  * @swagger
- * /api/v1/pokemons/local/{id}:
+ * /api/pokemons/local/{id}:
  *   put:
  *     tags:
  *       - pokemons
@@ -176,11 +176,11 @@ router.post('/name/:name/sync', requireAuth, PokemonsController.syncByName);
  *       404:
  *         description: Pokemon not found
  */
-router.put('/local/:id', requireAuth, PokemonsController.update);
+router.put('/local/:id', authenticate, PokemonsController.update);
 
 /**
  * @swagger
- * /api/v1/pokemons/local/{id}:
+ * /api/pokemons/local/{id}:
  *   delete:
  *     tags:
  *       - pokemons
@@ -199,6 +199,6 @@ router.put('/local/:id', requireAuth, PokemonsController.update);
  *       404:
  *         description: Pokemon not found
  */
-router.delete('/local/:id', requireAuth, PokemonsController.remove);
+router.delete('/local/:id', authenticate, PokemonsController.remove);
 
 export default router;
