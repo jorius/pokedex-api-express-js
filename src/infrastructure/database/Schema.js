@@ -91,6 +91,9 @@ const wallets = pgTable('wallets', {
   id: uuid('id').primaryKey().defaultRandom(),
   userId: uuid('user_id').notNull().unique().references(() => users.id, { onDelete: 'cascade' }),
   credits: integer('credits').notNull().default(10000),
+  // Iteration four — daily bonus. NULL means "never claimed", which reads as
+  // immediately claimable, so every pre-existing wallet gets a free first claim.
+  lastDailyClaimAt: timestamp('last_daily_claim_at', { withTimezone: true }),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
 }, (table) => [

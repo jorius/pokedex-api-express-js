@@ -5,6 +5,8 @@ import {
 
 // services
 import { createPokemonsService } from '../../application/services/PokemonsService.js';
+// rules
+import { BALL_TYPES, catchReward, releaseRefund } from '../../domain/rules/EconomyRules.js';
 // utils
 import { ConflictError } from '../../domain/errors/ConflictError.js';
 import { NotFoundError } from '../../domain/errors/NotFoundError.js';
@@ -16,6 +18,16 @@ const USER_B = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
 /** Rolls that force a deterministic outcome: 0 always catches, ~1 always escapes. */
 const ALWAYS_CATCHES = () => 0;
 const ALWAYS_ESCAPES = () => 0.9999999;
+
+/** Scripts a sequence of throws — one roll per attempt, in order. */
+const scriptedCatch = (...catches) => {
+  let index = 0;
+  return () => {
+    const lands = catches[index % catches.length];
+    index += 1;
+    return lands ? 0 : 0.9999999;
+  };
+};
 
 const detail = {
   pokeApiId: 1,
@@ -96,12 +108,16 @@ const createPokeApiClientMock = () => ({
 });
 
 const createPokemonsRepositoryMock = () => ({
-  upsertFromDetail: jest.fn(),
+  commitCatch: jest.fn(),
   findPage: jest.fn(),
   findByPokeApiId: jest.fn(),
   update: jest.fn(),
   delete: jest.fn(),
+  release: jest.fn(),
 });
+
+/** The commit a landed catch produces: the entry plus what the same transaction paid for it. */
+const commitOf = (entry, creditsAwarded) => ({ entry, creditsAwarded });
 
 /**
  * Ball ledger stand-in for the catch flow. Only consumeBall matters here — the
@@ -123,6 +139,7 @@ const createFakeBallLedger = (stock = { poke: 10 }) => {
       return remaining - 1;
     },
     getWallet: async () => null,
+    claimDaily: async () => null,
     purchase: async () => null,
     applySpin: async () => null,
     findSpinPage: async () => ({
@@ -137,11 +154,29 @@ const createFakeBallLedger = (stock = { poke: 10 }) => {
  * unique per (userId, pokemonId) and every read/update/delete filters by
  * userId. Used to test isolation and idempotency at the repository contract
  * level without a live database.
+ *
+ * It also mirrors the adapter's iteration-four money moves: a catch and a
+ * release settle their credits from the SAME rules functions the adapter uses,
+ * against the wallet balances exposed on `credits`, so a test can check the
+ * arithmetic end to end.
  */
-const createInMemoryRepository = () => {
+const createInMemoryRepository = (startingCredits = 0) => {
   const shared = new Map();
   const entries = [];
+  const credits = new Map();
   let sequence = 0;
+
+  /** Mirrors creditWallet(): a credit lands whenever the account has a wallet at all. */
+  const pay = (userId, amount) => {
+    credits.set(userId, (credits.get(userId) ?? startingCredits) + amount);
+    return amount;
+  };
+
+  const walletOf = (userId) => ({
+    credits: credits.get(userId) ?? startingCredits,
+    // The collection adapter does not model inventory; balls come back untouched.
+    balls: BALL_TYPES.map((type) => ({ type, quantity: 0 })),
+  });
 
   const nextId = () => {
     sequence += 1;
@@ -169,7 +204,9 @@ const createInMemoryRepository = () => {
   };
 
   return {
-    upsertFromDetail: async (userId, incoming) => {
+    credits,
+
+    commitCatch: async (userId, incoming) => {
       // Sorted by slot, mirroring the Drizzle adapter's deterministic ordering fix.
       const sortedAbilities = [...incoming.abilities].sort((a, b) => a.slot - b.slot);
       const normalized = { ...incoming, abilities: sortedAbilities };
@@ -177,7 +214,7 @@ const createInMemoryRepository = () => {
       const existing = entries.find((entry) => entry.userId === userId && entry.pokeApiId === normalized.pokeApiId);
       if (existing) {
         existing.updatedAt = new Date();
-        return toLocal(existing);
+        return { entry: toLocal(existing), creditsAwarded: pay(userId, catchReward(normalized.pokeApiId, false)) };
       }
       const now = new Date();
       const created = {
@@ -193,7 +230,7 @@ const createInMemoryRepository = () => {
         updatedAt: now,
       };
       entries.push(created);
-      return toLocal(created);
+      return { entry: toLocal(created), creditsAwarded: pay(userId, catchReward(normalized.pokeApiId, true)) };
     },
 
     findPage: async (userId, page, pageSize) => {
@@ -224,6 +261,15 @@ const createInMemoryRepository = () => {
       if (index === -1) return false;
       entries.splice(index, 1);
       return true;
+    },
+
+    // Same shape as the adapter: the delete is the guard, and only a delete that
+    // actually removed the caller's row pays a refund.
+    release: async (userId, id) => {
+      const index = entries.findIndex((entry) => entry.userId === userId && entry.id === id);
+      if (index === -1) return null;
+      const [removed] = entries.splice(index, 1);
+      return { creditsAwarded: pay(userId, releaseRefund(removed.pokeApiId)), wallet: walletOf(userId) };
     },
   };
 };
@@ -304,20 +350,21 @@ describe('PokemonsService', () => {
 
   it('syncById fetches then upserts for the calling user', async () => {
     pokeApiClient.getPokemonDetail.mockResolvedValueOnce(detail);
-    pokemonsRepository.upsertFromDetail.mockResolvedValueOnce(local);
+    pokemonsRepository.commitCatch.mockResolvedValueOnce(commitOf(local, 100));
 
     const result = await service.syncById(USER_A, 1);
 
-    expect(pokemonsRepository.upsertFromDetail).toHaveBeenCalledWith(USER_A, detail);
+    expect(pokemonsRepository.commitCatch).toHaveBeenCalledWith(USER_A, detail);
     expect(result.caught).toBe(true);
     expect(result.entry).toBe(local);
+    expect(result.creditsAwarded).toBe(100);
   });
 
   it('syncByName does not upsert when the PokeAPI lookup misses, and costs no ball', async () => {
     pokeApiClient.getPokemonDetail.mockResolvedValueOnce(null);
 
     await expect(service.syncByName(USER_A, 'missingno')).rejects.toBeInstanceOf(NotFoundError);
-    expect(pokemonsRepository.upsertFromDetail).not.toHaveBeenCalled();
+    expect(pokemonsRepository.commitCatch).not.toHaveBeenCalled();
     expect(economyRepository.consumed).toEqual([]);
     expect(economyRepository.stock.get('poke')).toBe(10);
   });
@@ -382,10 +429,27 @@ describe('PokemonsService', () => {
 
     expect(pokemonsRepository.delete).toHaveBeenCalledWith(USER_A, local.id);
   });
+
+  it('release validates the id, 404s on miss and never falls back to the refund-less delete', async () => {
+    await expect(service.release(USER_A, 'not-a-uuid')).rejects.toBeInstanceOf(ValidationError);
+    expect(pokemonsRepository.release).not.toHaveBeenCalled();
+
+    pokemonsRepository.release.mockResolvedValueOnce(null);
+    await expect(service.release(USER_A, local.id)).rejects.toThrow(`Local pokemon with key '${local.id}' was not found`);
+
+    pokemonsRepository.release.mockResolvedValueOnce({ creditsAwarded: 150, wallet: { credits: 1150, balls: [] } });
+    const result = await service.release(USER_A, local.id);
+
+    expect(pokemonsRepository.release).toHaveBeenCalledWith(USER_A, local.id);
+    expect(pokemonsRepository.delete).not.toHaveBeenCalled();
+    expect(result).toEqual({ creditsAwarded: 150, wallet: { credits: 1150, balls: [] } });
+    expect(Object.keys(result)).toEqual(['creditsAwarded', 'wallet']);
+  });
 });
 
 describe('PokemonsService with in-memory repository (ownership semantics)', () => {
   let pokeApiClient;
+  let pokemonsRepository;
   let service;
 
   // These tests are about ownership, not odds: the roll is pinned to always
@@ -398,12 +462,15 @@ describe('PokemonsService with in-memory repository (ownership semantics)', () =
 
   beforeEach(() => {
     pokeApiClient = createPokeApiClientMock();
-    pokeApiClient.getPokemonDetail.mockImplementation(
-      async (idOrName) => (idOrName === '7' ? shuffledAbilitiesDetail : detail),
-    );
+    pokeApiClient.getPokemonDetail.mockImplementation(async (idOrName) => {
+      if (idOrName === '7') return shuffledAbilitiesDetail;
+      if (idOrName === '150' || idOrName === 'mewtwo') return legendaryDetail;
+      return detail;
+    });
+    pokemonsRepository = createInMemoryRepository(1000);
     service = createPokemonsService({
       pokeApiClient,
-      pokemonsRepository: createInMemoryRepository(),
+      pokemonsRepository,
       economyRepository: createFakeBallLedger({ poke: 100 }),
       random: ALWAYS_CATCHES,
     });
@@ -492,6 +559,80 @@ describe('PokemonsService with in-memory repository (ownership semantics)', () =
     const found = await service.getLocalByPokeApiId(USER_A, 7);
     expect(found.abilities.map((a) => a.slot)).toEqual([1, 2, 3]);
   });
+
+  it('pays 100 for a species new to the collection and 25 for every re-catch', async () => {
+    const first = await service.syncById(USER_A, 1);
+    const second = await service.syncById(USER_A, 1);
+    const third = await service.syncById(USER_A, 1);
+
+    expect(first.creditsAwarded).toBe(100);
+    expect(second.creditsAwarded).toBe(25);
+    expect(third.creditsAwarded).toBe(25);
+    expect(pokemonsRepository.credits.get(USER_A)).toBe(1000 + 100 + 25 + 25);
+  });
+
+  it('pays 600 for a new legendary and 525 for re-catching one', async () => {
+    expect((await service.syncById(USER_A, 150)).creditsAwarded).toBe(600);
+    expect((await service.syncByName(USER_A, 'mewtwo')).creditsAwarded).toBe(525);
+    expect(pokemonsRepository.credits.get(USER_A)).toBe(1000 + 600 + 525);
+  });
+
+  it('pays each trainer for their OWN first catch of a shared species', async () => {
+    expect((await service.syncById(USER_A, 1)).creditsAwarded).toBe(100);
+    expect((await service.syncById(USER_B, 1)).creditsAwarded).toBe(100);
+    expect(pokemonsRepository.credits.get(USER_A)).toBe(1100);
+    expect(pokemonsRepository.credits.get(USER_B)).toBe(1100);
+  });
+
+  it('refunds a release and removes the entry from the collection', async () => {
+    const entry = await capture(USER_A, 1);
+
+    const released = await service.release(USER_A, entry.id);
+
+    expect(released.creditsAwarded).toBe(150);
+    expect(released.wallet.credits).toBe(1000 + 100 + 150);
+    expect((await service.getLocal(USER_A, 1, 20)).totalCount).toBe(0);
+    await expect(service.getLocalByPokeApiId(USER_A, 1)).rejects.toBeInstanceOf(NotFoundError);
+  });
+
+  it('refunds 600 for a legendary', async () => {
+    const entry = await capture(USER_A, 150);
+
+    expect((await service.release(USER_A, entry.id)).creditsAwarded).toBe(600);
+    expect(pokemonsRepository.credits.get(USER_A)).toBe(1000 + 600 + 600);
+  });
+
+  it('releases only the caller entry: another trainer 404s and keeps their own', async () => {
+    const entryA = await capture(USER_A, 1);
+    const entryB = await capture(USER_B, 1);
+
+    await expect(service.release(USER_B, entryA.id)).rejects.toBeInstanceOf(NotFoundError);
+    await expect(service.release(USER_B, entryA.id)).rejects.toThrow(`Local pokemon with key '${entryA.id}' was not found`);
+
+    // B paid nothing for the failed attempt, and both collections are intact.
+    expect(pokemonsRepository.credits.get(USER_B)).toBe(1100);
+    expect((await service.getLocal(USER_A, 1, 20)).items[0].id).toBe(entryA.id);
+    expect((await service.getLocal(USER_B, 1, 20)).items[0].id).toBe(entryB.id);
+  });
+
+  it('refuses to pay twice for the same entry', async () => {
+    const entry = await capture(USER_A, 1);
+
+    await service.release(USER_A, entry.id);
+    await expect(service.release(USER_A, entry.id)).rejects.toBeInstanceOf(NotFoundError);
+
+    expect(pokemonsRepository.credits.get(USER_A)).toBe(1000 + 100 + 150);
+  });
+
+  it('can be re-caught after a release, and pays the new-species reward again', async () => {
+    const entry = await capture(USER_A, 1);
+    await service.release(USER_A, entry.id);
+
+    const recaught = await service.syncById(USER_A, 1);
+
+    expect(recaught.creditsAwarded).toBe(100);
+    expect(recaught.entry?.id).not.toBe(entry.id);
+  });
 });
 
 describe('PokemonsService catch flow (iteration three)', () => {
@@ -515,7 +656,7 @@ describe('PokemonsService catch flow (iteration three)', () => {
     pokeApiClient.getPokemonDetail.mockImplementation(async (idOrName) => (
       idOrName === '150' || idOrName === 'mewtwo' ? legendaryDetail : detail
     ));
-    pokemonsRepository.upsertFromDetail.mockResolvedValue(local);
+    pokemonsRepository.commitCatch.mockResolvedValue(commitOf(local, 100));
   });
 
   it('consumes a ball and creates the entry when the throw lands', async () => {
@@ -524,10 +665,20 @@ describe('PokemonsService catch flow (iteration three)', () => {
     const result = await service.syncById(USER_A, 1);
 
     expect(result).toEqual({
-      caught: true, ballType: 'poke', remainingBalls: 9, chance: 0.4, entry: local,
+      caught: true, ballType: 'poke', remainingBalls: 9, chance: 0.4, creditsAwarded: 100, entry: local,
     });
     expect(economyRepository.consumed).toEqual(['poke']);
-    expect(pokemonsRepository.upsertFromDetail).toHaveBeenCalledTimes(1);
+    expect(pokemonsRepository.commitCatch).toHaveBeenCalledTimes(1);
+  });
+
+  // The three backends serialize this payload key by key: creditsAwarded was
+  // APPENDED after chance, and nothing before it may move.
+  it('keeps the catch key order: caught, ballType, remainingBalls, chance, creditsAwarded, entry', async () => {
+    const service = build(ALWAYS_CATCHES);
+
+    expect(Object.keys(await service.syncById(USER_A, 1))).toEqual([
+      'caught', 'ballType', 'remainingBalls', 'chance', 'creditsAwarded', 'entry',
+    ]);
   });
 
   it('consumes a ball and creates NO entry when the pokemon escapes', async () => {
@@ -536,11 +687,25 @@ describe('PokemonsService catch flow (iteration three)', () => {
     const result = await service.syncById(USER_A, 1);
 
     expect(result).toEqual({
-      caught: false, ballType: 'poke', remainingBalls: 9, chance: 0.4, entry: null,
+      caught: false, ballType: 'poke', remainingBalls: 9, chance: 0.4, creditsAwarded: 0, entry: null,
     });
     expect(economyRepository.consumed).toEqual(['poke']);
     expect(economyRepository.stock.get('poke')).toBe(9);
-    expect(pokemonsRepository.upsertFromDetail).not.toHaveBeenCalled();
+    expect(pokemonsRepository.commitCatch).not.toHaveBeenCalled();
+  });
+
+  it('pays for a landed catch exactly once, and never for an escape', async () => {
+    const service = build(scriptedCatch(true, false, true));
+
+    const first = await service.syncById(USER_A, 1);
+    const escaped = await service.syncById(USER_A, 1);
+    const third = await service.syncById(USER_A, 1);
+
+    expect([first.caught, escaped.caught, third.caught]).toEqual([true, false, true]);
+    expect([first.creditsAwarded, escaped.creditsAwarded, third.creditsAwarded]).toEqual([100, 0, 100]);
+    // Three balls thrown, two entries committed: the escape settled nothing at all.
+    expect(economyRepository.consumed).toHaveLength(3);
+    expect(pokemonsRepository.commitCatch).toHaveBeenCalledTimes(2);
   });
 
   it('spends a ball per attempt until the stock runs out, then 409s', async () => {

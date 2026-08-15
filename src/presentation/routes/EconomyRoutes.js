@@ -28,8 +28,12 @@ router.get('/catalogue', EconomyController.getCatalogue);
  *   get:
  *     tags:
  *       - economy
- *     summary: The caller's credit balance and ball inventory
- *     description: Always reports all four ball types in catalogue order, with quantity 0 for types never owned.
+ *     summary: The caller's credit balance, ball inventory, daily-bonus state and safety-net verdict
+ *     description: >
+ *       Always reports all four ball types in catalogue order, with quantity 0 for types never
+ *       owned. Also the anti-softlock checkpoint: a caller under 100 credits holding zero balls of
+ *       every type is granted 5 Poké Balls in the same transaction and gets safetyNetGranted true
+ *       for that one read.
  *     security:
  *       - bearerAuth: []
  *     responses:
@@ -41,6 +45,29 @@ router.get('/catalogue', EconomyController.getCatalogue);
  *         description: The caller has no wallet (an account created before the economy existed)
  */
 router.get('/wallet', authenticate, EconomyController.getWallet);
+
+/**
+ * @swagger
+ * /api/economy/daily:
+ *   post:
+ *     tags:
+ *       - economy
+ *     summary: Claim the daily bonus — 1000 credits, at most once per rolling 24 hours
+ *     description: >
+ *       The cooldown is enforced by a single conditional UPDATE (the 24h window is part of its
+ *       WHERE clause), so a double click can never pay twice. Answers the updated wallet plus
+ *       nextClaimAt, the ISO-8601 instant the bonus unlocks again.
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: Bonus granted — credits, balls and nextClaimAt
+ *       401:
+ *         description: Missing or invalid Bearer token
+ *       409:
+ *         description: Daily bonus already claimed
+ */
+router.post('/daily', authenticate, EconomyController.claimDaily);
 
 /**
  * @swagger

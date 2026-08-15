@@ -7,7 +7,7 @@ import {
 // services
 import { createEconomyService } from '../../application/services/EconomyService.js';
 // rules
-import { BALL_CATALOGUE, SLOT_REEL_POOL } from '../../domain/rules/EconomyRules.js';
+import { BALL_CATALOGUE, SLOT_REEL_POOL, needsSafetyNet } from '../../domain/rules/EconomyRules.js';
 // utils
 import { ConflictError } from '../../domain/errors/ConflictError.js';
 import { NotFoundError } from '../../domain/errors/NotFoundError.js';
@@ -37,6 +37,7 @@ const scriptedRandom = (...values) => {
 const createFakeEconomyRepository = () => {
   const credits = new Map();
   const inventory = new Map();
+  const claims = new Map();
   const spins = [];
   const key = (userId, ballType) => `${userId}:${ballType}`;
 
@@ -46,12 +47,21 @@ const createFakeEconomyRepository = () => {
     return {
       credits: balance,
       balls: BALL_TYPES.map((type) => ({ type, quantity: inventory.get(key(userId, type)) ?? 0 })),
+      lastDailyClaimAt: claims.get(userId) ?? null,
     };
+  };
+
+  // The two-field echo shape: the adapter projects the daily marker away for
+  // every endpoint except GET /wallet.
+  const echo = (userId) => {
+    const wallet = snapshot(userId);
+    return wallet && { credits: wallet.credits, balls: wallet.balls };
   };
 
   return {
     credits,
     inventory,
+    claims,
     spins,
 
     seed: (userId, startingCredits, balls) => {
@@ -59,7 +69,31 @@ const createFakeEconomyRepository = () => {
       Object.entries(balls).forEach(([type, quantity]) => inventory.set(key(userId, type), quantity));
     },
 
-    getWallet: async (userId) => snapshot(userId),
+    // Mirrors the adapter: the safety net is evaluated against the same snapshot
+    // the read returns, and a grant is reflected in the balls that come back.
+    getWallet: async (userId, safetyNet) => {
+      const wallet = snapshot(userId);
+      if (!wallet) return null;
+      if (!needsSafetyNet(wallet.credits, wallet.balls)) return { wallet, safetyNetGranted: false };
+      const held = key(userId, safetyNet.ballType);
+      inventory.set(held, (inventory.get(held) ?? 0) + safetyNet.quantity);
+      return { wallet: snapshot(userId) ?? wallet, safetyNetGranted: true };
+    },
+
+    // Mirrors the adapter's conditional UPDATE: the cutoff IS the guard, and a
+    // rejected guard returns null rather than throwing.
+    claimDaily: async ({
+      userId, amount, claimedAt, cutoff,
+    }) => {
+      const balance = credits.get(userId);
+      const lastClaimAt = claims.get(userId) ?? null;
+      if (balance === undefined) return null;
+      if (lastClaimAt !== null && lastClaimAt.getTime() > cutoff.getTime()) return null;
+      credits.set(userId, balance + amount);
+      claims.set(userId, claimedAt);
+      const wallet = echo(userId);
+      return wallet && { wallet, claimedAt };
+    },
 
     purchase: async ({
       userId, ballType, quantity, cost,
@@ -68,7 +102,7 @@ const createFakeEconomyRepository = () => {
       if (balance === undefined || balance < cost) return null;
       credits.set(userId, balance - cost);
       inventory.set(key(userId, ballType), (inventory.get(key(userId, ballType)) ?? 0) + quantity);
-      return snapshot(userId);
+      return echo(userId);
     },
 
     consumeBall: async (userId, ballType) => {
@@ -87,7 +121,7 @@ const createFakeEconomyRepository = () => {
       spins.unshift({
         id: crypto.randomUUID(), reels, cost, payout, outcome, createdAt: new Date().toISOString(),
       });
-      return snapshot(userId);
+      return echo(userId);
     },
 
     findSpinPage: async (userId, page, pageSize) => {
@@ -131,7 +165,20 @@ describe('EconomyService — catalogue and wallet', () => {
         { type: 'ultra', quantity: 0 },
         { type: 'master', quantity: 0 },
       ],
+      dailyAvailable: true,
+      nextDailyAt: null,
+      safetyNetGranted: false,
     });
+  });
+
+  // The three backends serialize this payload key by key; a reordering here is a
+  // contract break even though the values are identical.
+  it('keeps the wallet key order: credits, balls, then the iteration-four fields', async () => {
+    economyRepository.seed(USER_A, 10000, { poke: 10 });
+
+    expect(Object.keys(await service.getWallet(USER_A))).toEqual([
+      'credits', 'balls', 'dailyAvailable', 'nextDailyAt', 'safetyNetGranted',
+    ]);
   });
 
   it('404s when the caller has no wallet at all', async () => {
@@ -307,6 +354,145 @@ describe('EconomyService — slots', () => {
 
     expect((await service.spin(USER_B)).wallet.credits).toBe(0);
     await expect(service.spin(USER_B)).rejects.toThrow('Not enough credits');
+  });
+});
+
+describe('EconomyService — daily bonus', () => {
+  const HOUR = 3_600_000;
+  const DAY = 24 * HOUR;
+  let economyRepository;
+  let clock;
+  let service;
+
+  // The cooldown is a day long, so the clock is injected and moved by hand:
+  // these tests travel through the window instead of sleeping in it.
+  const travel = (milliseconds) => {
+    clock = new Date(clock.getTime() + milliseconds);
+  };
+
+  beforeEach(() => {
+    economyRepository = createFakeEconomyRepository();
+    economyRepository.seed(USER_A, 500, { poke: 1 });
+    clock = new Date('2026-08-15T12:00:00.000Z');
+    service = createEconomyService({ economyRepository, now: () => clock });
+  });
+
+  it('grants 1000 credits and reports when the bonus unlocks again', async () => {
+    const claim = await service.claimDaily(USER_A);
+
+    expect(claim.credits).toBe(1500);
+    expect(claim.balls).toContainEqual({ type: 'poke', quantity: 1 });
+    expect(claim.nextClaimAt).toBe('2026-08-16T12:00:00.000Z');
+  });
+
+  it('keeps the daily key order: credits, balls, nextClaimAt', async () => {
+    expect(Object.keys(await service.claimDaily(USER_A))).toEqual(['credits', 'balls', 'nextClaimAt']);
+  });
+
+  it('409s on a second claim inside the window and pays nothing extra', async () => {
+    await service.claimDaily(USER_A);
+
+    await expect(service.claimDaily(USER_A)).rejects.toBeInstanceOf(ConflictError);
+    await expect(service.claimDaily(USER_A)).rejects.toThrow('Daily bonus already claimed');
+    expect(economyRepository.credits.get(USER_A)).toBe(1500);
+
+    // Still refused a millisecond before the cooldown expires.
+    travel(DAY - 1);
+    await expect(service.claimDaily(USER_A)).rejects.toThrow('Daily bonus already claimed');
+    expect(economyRepository.credits.get(USER_A)).toBe(1500);
+  });
+
+  it('pays again exactly 24 hours later', async () => {
+    await service.claimDaily(USER_A);
+    travel(DAY);
+
+    const second = await service.claimDaily(USER_A);
+
+    expect(second.credits).toBe(2500);
+    expect(second.nextClaimAt).toBe('2026-08-17T12:00:00.000Z');
+  });
+
+  it('reports the daily state on the wallet without a second call', async () => {
+    const before = await service.getWallet(USER_A);
+    expect(before.dailyAvailable).toBe(true);
+    expect(before.nextDailyAt).toBeNull();
+
+    await service.claimDaily(USER_A);
+
+    const after = await service.getWallet(USER_A);
+    expect(after.dailyAvailable).toBe(false);
+    expect(after.nextDailyAt).toBe('2026-08-16T12:00:00.000Z');
+    expect(after.credits).toBe(1500);
+
+    travel(DAY);
+    const later = await service.getWallet(USER_A);
+    expect(later.dailyAvailable).toBe(true);
+    expect(later.nextDailyAt).toBeNull();
+  });
+
+  it('never lets two callers share a cooldown', async () => {
+    economyRepository.seed(USER_B, 0, { poke: 1 });
+
+    await service.claimDaily(USER_A);
+    const forB = await service.claimDaily(USER_B);
+
+    expect(forB.credits).toBe(1000);
+    expect(economyRepository.credits.get(USER_A)).toBe(1500);
+  });
+});
+
+describe('EconomyService — safety net', () => {
+  let economyRepository;
+  let service;
+
+  const quantityOf = (wallet, type) => wallet.balls.find((ball) => ball.type === type)?.quantity ?? 0;
+
+  beforeEach(() => {
+    economyRepository = createFakeEconomyRepository();
+    service = createEconomyService({ economyRepository });
+  });
+
+  it('grants 5 Poké Balls to a trainer who is broke and holding nothing', async () => {
+    economyRepository.seed(USER_A, 99, {});
+
+    const wallet = await service.getWallet(USER_A);
+
+    expect(wallet.safetyNetGranted).toBe(true);
+    expect(quantityOf(wallet, 'poke')).toBe(5);
+    expect(wallet.credits).toBe(99);
+  });
+
+  it('is idempotent on the next read: the balls it granted disqualify a second grant', async () => {
+    economyRepository.seed(USER_A, 0, {});
+
+    expect((await service.getWallet(USER_A)).safetyNetGranted).toBe(true);
+
+    const second = await service.getWallet(USER_A);
+    expect(second.safetyNetGranted).toBe(false);
+    expect(quantityOf(second, 'poke')).toBe(5);
+  });
+
+  it('does not trigger while either half of the condition fails', async () => {
+    // Exactly at the threshold — enough to be one spin away from a payout.
+    economyRepository.seed(USER_A, 100, {});
+    const atThreshold = await service.getWallet(USER_A);
+    expect(atThreshold.safetyNetGranted).toBe(false);
+    expect(quantityOf(atThreshold, 'poke')).toBe(0);
+
+    // Broke, but a single ball of any type is still a way back in.
+    economyRepository.seed(USER_B, 0, { ultra: 1 });
+    const withBall = await service.getWallet(USER_B);
+    expect(withBall.safetyNetGranted).toBe(false);
+    expect(quantityOf(withBall, 'poke')).toBe(0);
+  });
+
+  it('re-arms once the trainer spends their way back to nothing', async () => {
+    economyRepository.seed(USER_A, 0, { poke: 1 });
+    expect((await service.getWallet(USER_A)).safetyNetGranted).toBe(false);
+
+    economyRepository.inventory.set(`${USER_A}:poke`, 0);
+
+    expect((await service.getWallet(USER_A)).safetyNetGranted).toBe(true);
   });
 });
 

@@ -5,7 +5,12 @@ import { describe, expect, it } from '@jest/globals';
 import {
   BALL_CATALOGUE,
   BALL_TYPES,
+  CATCH_REWARD_NEW,
+  CATCH_REWARD_REPEAT,
+  DAILY_BONUS,
+  DAILY_COOLDOWN_HOURS,
   DEFAULT_BALL_TYPE,
+  LEGENDARY_CATCH_BONUS,
   LEGENDARY_POKE_API_IDS,
   MAX_CATCH_CHANCE,
   MIN_CATCH_CHANCE,
@@ -14,6 +19,10 @@ import {
   RARITY_LEGENDARY,
   RARITY_PSEUDO_LEGENDARY,
   RARITY_STRONG,
+  RELEASE_REFUND,
+  RELEASE_REFUND_LEGENDARY,
+  SAFETY_NET_BALL_GRANT,
+  SAFETY_NET_CREDITS_THRESHOLD,
   SLOT_COST,
   SLOT_JACKPOT_PAYOUT,
   SLOT_PAIR_PAYOUT,
@@ -28,13 +37,19 @@ import {
   ballPrice,
   baseStatTotal,
   catchChance,
+  catchReward,
   clampChance,
+  dailyClaimCutoff,
   evaluateSpin,
   findBall,
   isBallType,
+  isDailyAvailable,
   isLegendary,
   isSpinOutcome,
+  needsSafetyNet,
+  nextDailyClaimAt,
   rarityMultiplier,
+  releaseRefund,
   rollCatch,
   rollSpin,
   secureRandom,
@@ -304,6 +319,118 @@ describe('EconomyRules — slot payout table', () => {
   it('recognizes exactly the four persisted outcomes', () => {
     ['jackpot', 'triple', 'pair', 'none'].forEach((outcome) => expect(isSpinOutcome(outcome)).toBe(true));
     ['JACKPOT', 'win', ''].forEach((outcome) => expect(isSpinOutcome(outcome)).toBe(false));
+  });
+});
+
+describe('EconomyRules — catch rewards', () => {
+  it('pins the reward tiers', () => {
+    expect(CATCH_REWARD_NEW).toBe(100);
+    expect(CATCH_REWARD_REPEAT).toBe(25);
+    expect(LEGENDARY_CATCH_BONUS).toBe(500);
+  });
+
+  it('pays 100 for a species new to the collection and 25 for a re-catch', () => {
+    expect(catchReward(BULBASAUR, true)).toBe(100);
+    expect(catchReward(BULBASAUR, false)).toBe(25);
+  });
+
+  it('adds the legendary bonus on top of whichever tier applies', () => {
+    expect(catchReward(MEWTWO, true)).toBe(600);
+    expect(catchReward(MEWTWO, false)).toBe(525);
+  });
+
+  it('treats mythicals as legendary and pseudo-legendaries as ordinary', () => {
+    // Mew, Celebi, Arceus, Pecharunt — all in the canonical set.
+    [151, 251, 493, 1025].forEach((id) => expect(catchReward(id, true)).toBe(600));
+    // Dragonite and Tyranitar are 600-BST pseudo-legendaries, not legendaries.
+    [149, 248].forEach((id) => expect(catchReward(id, true)).toBe(100));
+    // Ultra Beasts stay ordinary here too, exactly as they do for the catch chance.
+    expect(catchReward(793, true)).toBe(100);
+  });
+});
+
+describe('EconomyRules — release refunds', () => {
+  it('pins the refunds', () => {
+    expect(RELEASE_REFUND).toBe(150);
+    expect(RELEASE_REFUND_LEGENDARY).toBe(600);
+  });
+
+  it('refunds 150 for an ordinary species and 600 for a legendary or mythical', () => {
+    expect(releaseRefund(BULBASAUR)).toBe(150);
+    expect(releaseRefund(149)).toBe(150);
+    expect(releaseRefund(MEWTWO)).toBe(600);
+    expect(releaseRefund(151)).toBe(600);
+    expect(releaseRefund(1025)).toBe(600);
+  });
+
+  it('never refunds more than the legendary catch pays, so releasing cannot farm credits', () => {
+    expect(releaseRefund(MEWTWO)).toBeLessThanOrEqual(catchReward(MEWTWO, true));
+    expect(releaseRefund(BULBASAUR)).toBeGreaterThan(catchReward(BULBASAUR, true));
+  });
+});
+
+describe('EconomyRules — daily bonus', () => {
+  const NOON = new Date('2026-08-15T12:00:00.000Z');
+  const HOUR = 3_600_000;
+
+  it('pins the bonus and the cooldown', () => {
+    expect(DAILY_BONUS).toBe(1000);
+    expect(DAILY_COOLDOWN_HOURS).toBe(24);
+  });
+
+  it('unlocks exactly 24 hours after a claim', () => {
+    expect(nextDailyClaimAt(NOON).toISOString()).toBe('2026-08-16T12:00:00.000Z');
+    expect(nextDailyClaimAt(NOON).getTime() - NOON.getTime()).toBe(DAILY_COOLDOWN_HOURS * HOUR);
+  });
+
+  it('cuts off claims made more than 24 hours ago', () => {
+    expect(dailyClaimCutoff(NOON).toISOString()).toBe('2026-08-14T12:00:00.000Z');
+    expect(NOON.getTime() - dailyClaimCutoff(NOON).getTime()).toBe(DAILY_COOLDOWN_HOURS * HOUR);
+  });
+
+  it('treats a wallet that never claimed as available', () => {
+    expect(isDailyAvailable(null, NOON)).toBe(true);
+  });
+
+  it('holds the boundary: 24h minus a millisecond is refused, exactly 24h is allowed', () => {
+    const cooldown = DAILY_COOLDOWN_HOURS * HOUR;
+    expect(isDailyAvailable(new Date(NOON.getTime() - cooldown + 1), NOON)).toBe(false);
+    expect(isDailyAvailable(new Date(NOON.getTime() - cooldown), NOON)).toBe(true);
+    expect(isDailyAvailable(new Date(NOON.getTime() - cooldown - 1), NOON)).toBe(true);
+  });
+
+  it('refuses a claim made moments ago, and one dated in the future', () => {
+    expect(isDailyAvailable(NOON, NOON)).toBe(false);
+    expect(isDailyAvailable(new Date(NOON.getTime() - HOUR), NOON)).toBe(false);
+    expect(isDailyAvailable(new Date(NOON.getTime() + HOUR), NOON)).toBe(false);
+  });
+});
+
+describe('EconomyRules — safety net', () => {
+  const holdings = (quantities) => BALL_TYPES.map((type) => ({ type, quantity: quantities[type] ?? 0 }));
+
+  it('pins the threshold and the grant', () => {
+    expect(SAFETY_NET_CREDITS_THRESHOLD).toBe(100);
+    expect(SAFETY_NET_BALL_GRANT).toBe(5);
+  });
+
+  it('triggers only when the trainer is broke AND holds nothing', () => {
+    expect(needsSafetyNet(99, holdings({}))).toBe(true);
+    expect(needsSafetyNet(0, holdings({}))).toBe(true);
+  });
+
+  it('does not trigger while there is still a way back into the game', () => {
+    // Credits enough to buy a ball...
+    expect(needsSafetyNet(SAFETY_NET_CREDITS_THRESHOLD, holdings({}))).toBe(false);
+    expect(needsSafetyNet(10000, holdings({}))).toBe(false);
+    // ...or a ball of ANY type still in the bag.
+    expect(needsSafetyNet(0, holdings({ poke: 1 }))).toBe(false);
+    expect(needsSafetyNet(0, holdings({ master: 1 }))).toBe(false);
+    expect(needsSafetyNet(99, holdings({ great: 2 }))).toBe(false);
+  });
+
+  it('treats an inventory with no rows at all as holding nothing', () => {
+    expect(needsSafetyNet(0, [])).toBe(true);
   });
 });
 

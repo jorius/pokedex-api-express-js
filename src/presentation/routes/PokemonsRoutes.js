@@ -281,4 +281,38 @@ router.put('/local/:id', authenticate, PokemonsController.update);
  */
 router.delete('/local/:id', authenticate, PokemonsController.remove);
 
+/**
+ * @swagger
+ * /api/pokemons/local/{entryId}/release:
+ *   post:
+ *     tags:
+ *       - pokemons
+ *     summary: Release one of the caller's collection entries for credits
+ *     description: >
+ *       Deletes the entry and refunds 150 credits (600 for a legendary/mythical) in one
+ *       transaction. Distinct from DELETE /api/pokemons/local/{id}, which deletes without paying.
+ *       The shared pokemons replica row is a cache and stays.
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: entryId
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Collection entry id (uuid)
+ *     responses:
+ *       200:
+ *         description: Released — creditsAwarded and the updated wallet
+ *       400:
+ *         description: Malformed entry id
+ *       401:
+ *         description: Missing or invalid Bearer token
+ *       404:
+ *         description: Not the caller's entry, or no such entry
+ */
+// Three segments, so it cannot collide with POST '/:id/sync' (two segments) or
+// with the PUT/DELETE '/local/:id' pair (different methods, two segments).
+router.post('/local/:entryId/release', authenticate, PokemonsController.release);
+
 export default router;

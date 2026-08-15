@@ -148,6 +148,37 @@ const SLOT_PAIR_PAYOUT = 200;
 const SLOT_NO_PAYOUT = 0;
 
 /* ------------------------------------------------------------------ */
+/* Earning (iteration four — closing the economy loop)                 */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Catch rewards, paid on a SUCCESSFUL throw only (plan §1.A). The legendary
+ * bonus is additive on top of the base tier, so a new legendary pays 600 and a
+ * re-catch of one pays 525.
+ */
+const CATCH_REWARD_NEW = 100;
+const CATCH_REWARD_REPEAT = 25;
+const LEGENDARY_CATCH_BONUS = 500;
+
+/** Daily bonus (plan §1.B): 1000 credits, at most once per rolling 24 hours. */
+const DAILY_BONUS = 1000;
+const DAILY_COOLDOWN_HOURS = 24;
+
+/** Release refunds (plan §1.C): what letting a pokemon go pays back. */
+const RELEASE_REFUND = 150;
+const RELEASE_REFUND_LEGENDARY = 600;
+
+/**
+ * Safety net (plan §1.D) — the anti-softlock guarantee. A trainer under the
+ * credit threshold AND out of every ball type is handed enough Poké Balls
+ * (STARTER_BALL_TYPE) to catch their way back into the economy.
+ */
+const SAFETY_NET_CREDITS_THRESHOLD = 100;
+const SAFETY_NET_BALL_GRANT = 5;
+
+const MILLISECONDS_PER_HOUR = 3_600_000;
+
+/* ------------------------------------------------------------------ */
 /* Randomness                                                          */
 /* ------------------------------------------------------------------ */
 
@@ -323,6 +354,71 @@ const rollSpin = (random = secureRandom) => {
  */
 const isSpinOutcome = (value) => ['jackpot', 'triple', 'pair', 'none'].includes(value);
 
+/**
+ * Credits paid for a landed throw. `isNewSpecies` is the persistence layer's
+ * verdict (did this catch create the caller's first entry for this species?),
+ * never a client claim.
+ *
+ * @param {number} pokeApiId
+ * @param {boolean} isNewSpecies
+ * @returns {number}
+ */
+const catchReward = (pokeApiId, isNewSpecies) => (
+  (isNewSpecies ? CATCH_REWARD_NEW : CATCH_REWARD_REPEAT) + (isLegendary(pokeApiId) ? LEGENDARY_CATCH_BONUS : 0)
+);
+
+/**
+ * Credits paid for releasing an entry — rarity is the only input.
+ *
+ * @param {number} pokeApiId
+ * @returns {number}
+ */
+const releaseRefund = (pokeApiId) => (isLegendary(pokeApiId) ? RELEASE_REFUND_LEGENDARY : RELEASE_REFUND);
+
+/**
+ * The instant a claim made at `claimedAt` unlocks again.
+ *
+ * @param {Date} claimedAt
+ * @returns {Date}
+ */
+const nextDailyClaimAt = (claimedAt) => new Date(claimedAt.getTime() + DAILY_COOLDOWN_HOURS * MILLISECONDS_PER_HOUR);
+
+/**
+ * Claims made at or before this instant have expired. Used as the guard in the
+ * conditional UPDATE that pays the bonus, so the cooldown is enforced by the
+ * database rather than by a read-then-write in the service.
+ *
+ * @param {Date} now
+ * @returns {Date}
+ */
+const dailyClaimCutoff = (now) => new Date(now.getTime() - DAILY_COOLDOWN_HOURS * MILLISECONDS_PER_HOUR);
+
+/**
+ * Never claimed (null) reads as available, which is what every wallet that
+ * predates the daily bonus gets. The boundary is INCLUSIVE: at exactly 24h
+ * after the last claim the bonus is claimable again.
+ *
+ * @param {Date|null} lastClaimAt
+ * @param {Date} now
+ * @returns {boolean}
+ */
+const isDailyAvailable = (lastClaimAt, now) => (
+  lastClaimAt === null || lastClaimAt.getTime() <= dailyClaimCutoff(now).getTime()
+);
+
+/**
+ * The anti-softlock predicate: broke AND out of every ball type. Both halves
+ * must hold — a trainer with credits can buy balls, and a trainer with balls
+ * can catch their way back to credits.
+ *
+ * @param {number} credits
+ * @param {import('../types/Economy.types.js').BallHolding[]} balls
+ * @returns {boolean}
+ */
+const needsSafetyNet = (credits, balls) => (
+  credits < SAFETY_NET_CREDITS_THRESHOLD && balls.every((ball) => ball.quantity <= 0)
+);
+
 export {
   STARTER_CREDITS,
   STARTER_BALL_TYPE,
@@ -346,6 +442,15 @@ export {
   SLOT_TRIPLE_PAYOUT,
   SLOT_PAIR_PAYOUT,
   SLOT_NO_PAYOUT,
+  CATCH_REWARD_NEW,
+  CATCH_REWARD_REPEAT,
+  LEGENDARY_CATCH_BONUS,
+  DAILY_BONUS,
+  DAILY_COOLDOWN_HOURS,
+  RELEASE_REFUND,
+  RELEASE_REFUND_LEGENDARY,
+  SAFETY_NET_CREDITS_THRESHOLD,
+  SAFETY_NET_BALL_GRANT,
   secureRandom,
   isBallType,
   isLegendary,
@@ -361,4 +466,10 @@ export {
   spinReels,
   evaluateSpin,
   rollSpin,
+  catchReward,
+  releaseRefund,
+  nextDailyClaimAt,
+  dailyClaimCutoff,
+  isDailyAvailable,
+  needsSafetyNet,
 };

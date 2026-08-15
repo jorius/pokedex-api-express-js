@@ -1,13 +1,14 @@
 // packages
 import {
-  and, count, desc, eq, gte, sql,
+  and, count, desc, eq, exists, gt, gte, isNull, lt, lte, notExists, or, sql,
 } from 'drizzle-orm';
+import { alias } from 'drizzle-orm/pg-core';
 
 // database
 import { db } from '../database/Database.js';
 import { ballInventory, spinResults, wallets } from '../database/Schema.js';
 // rules
-import { BALL_TYPES, isSpinOutcome } from '../../domain/rules/EconomyRules.js';
+import { BALL_TYPES, isSpinOutcome, needsSafetyNet } from '../../domain/rules/EconomyRules.js';
 
 /**
  * Drizzle adapter for wallets + ball_inventory + spin_results.
@@ -30,6 +31,8 @@ import { BALL_TYPES, isSpinOutcome } from '../../domain/rules/EconomyRules.js';
  * @typedef {import('../../domain/types/Economy.types.js').BallType} BallType
  * @typedef {import('../../domain/types/Economy.types.js').SpinRecord} SpinRecord
  * @typedef {import('../../domain/types/Economy.types.js').Wallet} Wallet
+ * @typedef {import('../../application/ports/EconomyRepositoryPort.js').SafetyNetGrant} SafetyNetGrant
+ * @typedef {import('../../application/ports/EconomyRepositoryPort.js').WalletSnapshot} WalletSnapshot
  */
 
 /**
@@ -40,10 +43,10 @@ import { BALL_TYPES, isSpinOutcome } from '../../domain/rules/EconomyRules.js';
  *
  * @param {typeof db} executor
  * @param {string} userId
- * @returns {Promise<Wallet|null>}
+ * @returns {Promise<WalletSnapshot|null>}
  */
-const readWallet = async (executor, userId) => {
-  const [wallet] = await executor.select({ credits: wallets.credits })
+const readSnapshot = async (executor, userId) => {
+  const [wallet] = await executor.select({ credits: wallets.credits, lastDailyClaimAt: wallets.lastDailyClaimAt })
     .from(wallets)
     .where(eq(wallets.userId, userId))
     .limit(1);
@@ -60,7 +63,26 @@ const readWallet = async (executor, userId) => {
   return {
     credits: wallet.credits,
     balls: BALL_TYPES.map((type) => ({ type, quantity: quantities.get(type) ?? 0 })),
+    lastDailyClaimAt: wallet.lastDailyClaimAt,
   };
+};
+
+/**
+ * The two-field wallet every mutating endpoint echoes back. It deliberately
+ * projects `lastDailyClaimAt` AWAY: only GET /api/economy/wallet reports the
+ * daily state, so buying, spinning, claiming and releasing all keep answering
+ * the exact shape they answered before iteration four.
+ *
+ * @param {typeof db} executor
+ * @param {string} userId
+ * @returns {Promise<Wallet|null>}
+ */
+const readWallet = async (executor, userId) => {
+  const snapshot = await readSnapshot(executor, userId);
+  if (!snapshot) {
+    return null;
+  }
+  return { credits: snapshot.credits, balls: snapshot.balls };
 };
 
 /**
@@ -96,12 +118,104 @@ const debit = async (executor, userId, cost, payout) => {
   return debited.length > 0;
 };
 
+/**
+ * The mirror of debit() for the iteration-four earnings (catch rewards, release
+ * refunds). A credit needs no balance guard — a balance can only grow — so the
+ * identity of the wallet IS the guard, and the affected row count answers "does
+ * this account have a wallet at all". Exported so PokemonsRepository can pay
+ * inside ITS transactions: every UPDATE of wallets.credits lives in this file.
+ *
+ * @param {typeof db} executor
+ * @param {string} userId
+ * @param {number} amount
+ * @returns {Promise<boolean>}
+ */
+const creditWallet = async (executor, userId, amount) => {
+  const credited = await executor.update(wallets)
+    .set({ credits: sql`${wallets.credits} + ${amount}`, updatedAt: new Date() })
+    .where(eq(wallets.userId, userId))
+    .returning({ credits: wallets.credits });
+  return credited.length > 0;
+};
+
+/**
+ * The anti-softlock grant, as ONE guarded statement. The caller has already
+ * evaluated needsSafetyNet against a snapshot from this transaction; the
+ * `setWhere` below re-asserts BOTH halves of that predicate against whatever a
+ * conflicting writer committed, so two simultaneous wallet reads can never both
+ * top the same trainer up:
+ *   - the row that already exists must still hold zero of this ball type,
+ *   - no OTHER ball type may hold anything,
+ *   - the balance must still be under the threshold.
+ * The plain INSERT path (no inventory row yet) needs no guard: the unique index
+ * on (user_id, ball_type) forces any racing writer onto the guarded branch.
+ *
+ * @param {typeof db} executor
+ * @param {string} userId
+ * @param {SafetyNetGrant} grant
+ * @returns {Promise<boolean>}
+ */
+const grantSafetyNet = async (executor, userId, grant) => {
+  const held = alias(ballInventory, 'held');
+  const granted = await executor.insert(ballInventory)
+    .values({ userId, ballType: grant.ballType, quantity: grant.quantity })
+    .onConflictDoUpdate({
+      target: [ballInventory.userId, ballInventory.ballType],
+      set: { quantity: sql`${ballInventory.quantity} + ${grant.quantity}`, updatedAt: new Date() },
+      setWhere: and(
+        eq(ballInventory.quantity, 0),
+        exists(db.select({ ok: sql`1` }).from(wallets)
+          .where(and(eq(wallets.userId, userId), lt(wallets.credits, grant.creditsThreshold)))),
+        notExists(db.select({ ok: sql`1` }).from(held)
+          .where(and(eq(held.userId, userId), gt(held.quantity, 0)))),
+      ),
+    })
+    .returning({ quantity: ballInventory.quantity });
+  return granted.length > 0;
+};
+
 /** @type {import('../../application/ports/EconomyRepositoryPort.js').EconomyRepositoryPort} */
 const economyRepository = {
   // Wrapped in a transaction so credits and inventory come from one consistent
   // snapshot — a purchase landing between the two selects can never produce a
-  // wallet that shows the new balls but the old balance.
-  getWallet: async (userId) => db.transaction(async (tx) => readWallet(tx, userId)),
+  // wallet that shows the new balls but the old balance. Since iteration four
+  // the safety net is evaluated in that same transaction, so a granted read
+  // always reports the balls it just handed out.
+  getWallet: async (userId, safetyNet) => db.transaction(async (tx) => {
+    const wallet = await readSnapshot(tx, userId);
+    if (!wallet) {
+      return null;
+    }
+    if (!needsSafetyNet(wallet.credits, wallet.balls) || !await grantSafetyNet(tx, userId, safetyNet)) {
+      return { wallet, safetyNetGranted: false };
+    }
+    // Re-read rather than patch the snapshot in memory: the grant is an UPDATE
+    // and the row it produced is the only truthful source for the new quantity.
+    return { wallet: await readSnapshot(tx, userId) ?? wallet, safetyNetGranted: true };
+  }),
+
+  // Race-safe by construction: the cooldown lives in the WHERE clause, so a
+  // second claim arriving during the window matches zero rows and is refused
+  // even if both requests read the same wallet a microsecond apart. NULL means
+  // never claimed, which the guard treats as claimable.
+  claimDaily: async ({
+    userId, amount, claimedAt, cutoff,
+  }) => db.transaction(async (tx) => {
+    const [claimed] = await tx.update(wallets)
+      .set({ credits: sql`${wallets.credits} + ${amount}`, lastDailyClaimAt: claimedAt, updatedAt: claimedAt })
+      .where(and(
+        eq(wallets.userId, userId),
+        or(isNull(wallets.lastDailyClaimAt), lte(wallets.lastDailyClaimAt, cutoff)),
+      ))
+      .returning({ claimedAt: wallets.lastDailyClaimAt });
+
+    if (!claimed?.claimedAt) {
+      return null;
+    }
+
+    const wallet = await readWallet(tx, userId);
+    return wallet ? { wallet, claimedAt: claimed.claimedAt } : null;
+  }),
 
   purchase: async ({
     userId, ballType, quantity, cost,
@@ -174,4 +288,4 @@ const economyRepository = {
   },
 };
 
-export { economyRepository };
+export { economyRepository, readWallet, creditWallet };

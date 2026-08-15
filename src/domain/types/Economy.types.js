@@ -19,12 +19,50 @@
  */
 
 /**
- * What GET /api/economy/wallet returns, and what every mutating endpoint echoes back.
+ * The wallet as every mutating endpoint (shop, slots, daily, release) echoes it back.
  *
  * @typedef {object} Wallet
  * @property {number} credits
  * @property {BallHolding[]} balls
+ */
+
+/**
+ * What GET /api/economy/wallet returns: the wallet plus the daily-bonus state
+ * and the safety-net verdict for THIS read (iteration four). Key order is part
+ * of the cross-service contract — existing keys first, then the new ones:
+ * credits, balls, dailyAvailable, nextDailyAt, safetyNetGranted.
  *
+ * `nextDailyAt` is null exactly when `dailyAvailable` is true: there is nothing
+ * to count down to while the button is enabled.
+ *
+ * @typedef {object} WalletStatus
+ * @property {number} credits
+ * @property {BallHolding[]} balls
+ * @property {boolean} dailyAvailable
+ * @property {string|null} nextDailyAt
+ * @property {boolean} safetyNetGranted
+ */
+
+/**
+ * POST /api/economy/daily response: the updated wallet plus when the bonus
+ * unlocks again. Key order: credits, balls, nextClaimAt.
+ *
+ * @typedef {object} DailyClaim
+ * @property {number} credits
+ * @property {BallHolding[]} balls
+ * @property {string} nextClaimAt
+ */
+
+/**
+ * POST /api/pokemons/local/{entryId}/release response. Key order:
+ * creditsAwarded, wallet.
+ *
+ * @typedef {object} ReleaseResult
+ * @property {number} creditsAwarded
+ * @property {Wallet} wallet
+ */
+
+/**
  * @typedef {object} SpinEvaluation
  * @property {SpinOutcome} outcome
  * @property {number} payout
@@ -62,11 +100,16 @@
  * or not the roll succeeded; `entry` is the collection entry on success and
  * null when the pokemon escaped.
  *
+ * Key order is part of the cross-service contract. `creditsAwarded` (iteration
+ * four) was APPENDED after `chance` and before `entry` — 0 on an escape, and
+ * the catch reward paid in the same transaction as the entry on a success.
+ *
  * @typedef {object} CatchResult
  * @property {boolean} caught
  * @property {BallType} ballType
  * @property {number} remainingBalls
  * @property {number} chance
+ * @property {number} creditsAwarded
  * @property {import('./Pokemon.types.js').LocalPokemon|null} entry
  */
 

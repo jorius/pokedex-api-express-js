@@ -52,6 +52,14 @@ const getSpinHistory = async (req, res, next) => {
   }
 };
 
+const claimDaily = async (req, res, next) => {
+  try {
+    res.json(ok(await economyService.claimDaily(callerId(req))));
+  } catch (error) {
+    next(error);
+  }
+};
+
 export {
-  getCatalogue, getWallet, buy, spin, getSpinHistory,
+  getCatalogue, getWallet, buy, spin, getSpinHistory, claimDaily,
 };

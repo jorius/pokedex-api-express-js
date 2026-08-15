@@ -6,12 +6,25 @@ import {
 // database
 import { db } from '../database/Database.js';
 import { collectionEntries, pokemonAbilities, pokemons } from '../database/Schema.js';
+// repositories
+import { creditWallet, readWallet } from './EconomyRepository.js';
+// rules
+import { catchReward, releaseRefund } from '../../domain/rules/EconomyRules.js';
+// utils
+import { NotFoundError } from '../../domain/errors/NotFoundError.js';
 
 /**
  * Drizzle adapter for the pokemons + pokemon_abilities + collection_entries
  * tables. pokemons/pokemon_abilities form the shared PokeAPI replica cache;
  * collection_entries carries per-user ownership and proprietary fields, and is
  * the only table filtered by userId.
+ *
+ * Since iteration four two of these operations also MOVE CREDITS, and both do
+ * it inside the transaction that writes (or deletes) the entry, using the
+ * guarded helpers from EconomyRepository so that every UPDATE of wallets lives
+ * in one file. The amount is never decided here: the pure functions in the
+ * rules module price the DB's verdict (was the entry new? was the species
+ * legendary?), which is the only place that verdict can be observed atomically.
  */
 
 /**
@@ -69,7 +82,7 @@ const abilitiesFor = async (pokemonIds) => {
  * @type {import('../../application/ports/PokemonsRepositoryPort.js').PokemonsRepositoryPort}
  */
 const pokemonsRepository = {
-  upsertFromDetail: async (userId, detail) => db.transaction(async (tx) => {
+  commitCatch: async (userId, detail) => db.transaction(async (tx) => {
     const [row] = await tx.insert(pokemons)
       .values({
         pokeApiId: detail.pokeApiId,
@@ -109,15 +122,29 @@ const pokemonsRepository = {
 
     // Idempotent capture: re-syncing refreshes the entry's updatedAt and
     // returns the existing row (proprietary fields untouched), never duplicates.
-    const [entry] = await tx.insert(collectionEntries)
+    //
+    // INSERT ... ON CONFLICT DO NOTHING first, because whether it produced a row
+    // is the ATOMIC new-vs-repeat verdict that prices the catch: a second
+    // concurrent catch of the same species blocks on the unique index, then
+    // returns nothing, and is paid as the re-catch it is. A read-then-write
+    // ("does an entry exist?") would let both attempts collect the new-species
+    // reward.
+    const [inserted] = await tx.insert(collectionEntries)
       .values({ userId, pokemonId: row.id })
-      .onConflictDoUpdate({
-        target: [collectionEntries.userId, collectionEntries.pokemonId],
-        set: { updatedAt: new Date() },
-      })
+      .onConflictDoNothing({ target: [collectionEntries.userId, collectionEntries.pokemonId] })
       .returning();
 
-    return toLocal(entry, row, sortedAbilities);
+    const [entry] = inserted ? [inserted] : await tx.update(collectionEntries)
+      .set({ updatedAt: new Date() })
+      .where(and(eq(collectionEntries.userId, userId), eq(collectionEntries.pokemonId, row.id)))
+      .returning();
+
+    // A wallet-less account (impossible since iteration three provisions one
+    // with the user row) still keeps its catch — it just earns nothing.
+    const reward = catchReward(detail.pokeApiId, Boolean(inserted));
+    const paid = await creditWallet(tx, userId, reward);
+
+    return { entry: toLocal(entry, row, sortedAbilities), creditsAwarded: paid ? reward : 0 };
   }),
 
   findPage: async (userId, page, pageSize) => {
@@ -181,6 +208,46 @@ const pokemonsRepository = {
       .returning({ id: collectionEntries.id });
     return rows.length > 0;
   },
+
+  release: async (userId, id) => db.transaction(async (tx) => {
+    // The join is only how the refund is PRICED (rarity lives on the shared
+    // replica, not on the entry). The DELETE below is the guard that decides
+    // whether this caller gets paid at all.
+    const [found] = await tx.select({ pokeApiId: pokemons.pokeApiId })
+      .from(collectionEntries)
+      .innerJoin(pokemons, eq(collectionEntries.pokemonId, pokemons.id))
+      .where(and(eq(collectionEntries.id, id), eq(collectionEntries.userId, userId)))
+      .limit(1);
+
+    if (!found) {
+      return null;
+    }
+
+    // Single guarded DELETE, verdict from the affected rows: two concurrent
+    // releases of the same entry can never both refund it, and an entry that is
+    // not the caller's matches nothing.
+    const deleted = await tx.delete(collectionEntries)
+      .where(and(eq(collectionEntries.id, id), eq(collectionEntries.userId, userId)))
+      .returning({ id: collectionEntries.id });
+
+    if (deleted.length === 0) {
+      return null;
+    }
+
+    const refund = releaseRefund(found.pokeApiId);
+    const paid = await creditWallet(tx, userId, refund);
+    const wallet = await readWallet(tx, userId);
+
+    // A wallet-less account cannot happen (registration provisions one in the
+    // same transaction as the user row). Throwing rather than answering a
+    // refund-less success rolls the DELETE back, so a pokemon is never given up
+    // for nothing.
+    if (!paid || !wallet) {
+      throw new NotFoundError('Wallet', userId);
+    }
+
+    return { creditsAwarded: refund, wallet };
+  }),
 };
 
 export { pokemonsRepository };

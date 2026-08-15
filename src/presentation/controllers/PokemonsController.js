@@ -117,6 +117,17 @@ const remove = async (req, res, next) => {
   }
 };
 
+// Release is a POST, not a DELETE: it MOVES CREDITS as well as deleting the
+// entry, so it is a deliberate action with a body-less payload of its own —
+// and it leaves the plain DELETE (no refund) exactly as it was.
+const release = async (req, res, next) => {
+  try {
+    res.json(ok(await pokemonsService.release(callerId(req), req.params.entryId)));
+  } catch (error) {
+    next(error);
+  }
+};
+
 export {
-  browse, getDetailById, getDetailByName, syncById, syncByName, getLocal, getLocalByPokeApiId, update, remove,
+  browse, getDetailById, getDetailByName, syncById, syncByName, getLocal, getLocalByPokeApiId, update, remove, release,
 };

@@ -21,6 +21,7 @@ import { ValidationError } from '../../domain/errors/ValidationError.js';
  *
  * @typedef {import('../../domain/types/Economy.types.js').BallType} BallType
  * @typedef {import('../../domain/types/Economy.types.js').CatchResult} CatchResult
+ * @typedef {import('../../domain/types/Economy.types.js').ReleaseResult} ReleaseResult
  */
 
 const MAX_FIELD_LENGTH = 500;
@@ -113,7 +114,12 @@ const createPokemonsService = ({
    *   4. the chance is computed from the ball and the pokemon's own rarity, and
    *      the roll happens here on the server;
    *   5. only a successful throw upserts a collection entry — an escape writes
-   *      nothing and reports `entry: null`.
+   *      nothing, reports `entry: null` and pays no credits;
+   *   6. a landed throw is paid for in the SAME transaction as the entry
+   *      (iteration four): +100 for a species new to the caller, +25 for a
+   *      re-catch, +500 on top for a legendary. The amount is priced by the
+   *      rules module from the insert's own new-vs-repeat verdict, so a catch
+   *      can never be paid twice or paid for an entry that was not written.
    *
    * @returns {Promise<CatchResult>}
    */
@@ -123,10 +129,15 @@ const createPokemonsService = ({
 
     const chance = catchChance(ballType, detail.pokeApiId, baseStatTotal(detail.stats));
     const caught = rollCatch(chance, random);
-    const entry = caught ? await pokemonsRepository.upsertFromDetail(userId, detail) : null;
+    const commit = caught ? await pokemonsRepository.commitCatch(userId, detail) : null;
 
     return {
-      caught, ballType, remainingBalls, chance, entry,
+      caught,
+      ballType,
+      remainingBalls,
+      chance,
+      creditsAwarded: commit?.creditsAwarded ?? 0,
+      entry: commit?.entry ?? null,
     };
   };
 
@@ -166,8 +177,24 @@ const createPokemonsService = ({
     if (!deleted) throw new NotFoundError('Local pokemon', id);
   };
 
+  /**
+   * Letting a pokemon go for credits — a DIFFERENT action from remove(), which
+   * deletes without paying and stays exactly as it was. The refund (150, or 600
+   * for a legendary/mythical) and the deletion settle in one transaction, so a
+   * released entry is always paid for exactly once. An entry that is not the
+   * caller's is indistinguishable from one that does not exist: both 404.
+   *
+   * @returns {Promise<ReleaseResult>}
+   */
+  const release = async (userId, id) => {
+    validateLocalId(id);
+    const released = await pokemonsRepository.release(userId, id);
+    if (!released) throw new NotFoundError('Local pokemon', id);
+    return { creditsAwarded: released.creditsAwarded, wallet: released.wallet };
+  };
+
   return {
-    browse, getDetailById, getDetailByName, syncById, syncByName, getLocal, getLocalByPokeApiId, update, remove,
+    browse, getDetailById, getDetailByName, syncById, syncByName, getLocal, getLocalByPokeApiId, update, remove, release,
   };
 };
 
