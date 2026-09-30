@@ -3,6 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "description": "Pokedex REST API — Express 5 + JavaScript, clean architecture, PostgreSQL (Drizzle) and two-tier PokeAPI caching",
+  "license": "MIT",
   "type": "module",
   "engines": {
     "node": ">=22"
