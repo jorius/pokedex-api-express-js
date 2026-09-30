@@ -2,7 +2,7 @@
 
 RESTful Pokedex API built with **Express 5 + modern JavaScript (ESM)** on Node 22. It integrates with the external [PokeAPI](https://pokeapi.co/docs/v2), replicates Pokemon data on demand into a shared **PostgreSQL** database (Drizzle ORM), caches upstream reads through a **two-tier L1/L2 cache** (in-memory + optional Redis), and exposes CRUD + JWT auth endpoints — plus a **pokeball economy** (credits, a ball shop, a slots minigame and probabilistic catching) — documented with Swagger.
 
-This repo is the **plain-JavaScript mirror** of [`pokedex-api-express-ts`](../pokedex-api-express-ts): same clean architecture, same routes, same wire responses — with JSDoc typedefs standing in for TypeScript interfaces. Its key differentiator inside the ecosystem is also its key constraint: it is a **read-only schema mirror**. The database schema is owned by the TS repo; this repo queries the shared tables but never migrates them.
+This repo is the **plain-JavaScript mirror** of [`pokedex-api-express-ts`](https://github.com/jorius/pokedex-api-express-ts): same clean architecture, same routes, same wire responses — with JSDoc typedefs standing in for TypeScript interfaces. Its key differentiator inside the ecosystem is also its key constraint: it is a **read-only schema mirror**. The database schema is owned by the TS repo; this repo queries the shared tables but never migrates them.
 
 ## Ecosystem overview
 
@@ -10,10 +10,10 @@ Four repositories make up the ecosystem. The three backends are **contract-ident
 
 | Repo | Stack | Port | Role |
 |---|---|---|---|
-| [`pokedex-api-express-ts`](../pokedex-api-express-ts) | Node 22, Express 5, TypeScript, Drizzle | 3001 | Backend — reference implementation; **schema + infra owner** |
+| [`pokedex-api-express-ts`](https://github.com/jorius/pokedex-api-express-ts) | Node 22, Express 5, TypeScript, Drizzle | 3001 | Backend — reference implementation; **schema + infra owner** |
 | [`pokedex-api-express-js`](.) | Node 22, Express 5, JavaScript (ESM) | 3000 | Backend — **this repo**; plain-JS mirror |
-| [`pokedex-api-dotnet`](../pokedex-api-dotnet) | ASP.NET Core (.NET 10), EF Core, Npgsql | 5257 | Backend — database-first EF mapping |
-| [`pokedex-web`](../pokedex-web) | React 19, Vite, TypeScript | 5173 | Frontend with a live backend switcher |
+| [`pokedex-api-dotnet`](https://github.com/jorius/pokedex-api-dotnet) | ASP.NET Core (.NET 10), EF Core, Npgsql | 5257 | Backend — database-first EF mapping |
+| [`pokedex-web`](https://github.com/jorius/pokedex-web) | React 19, Vite, TypeScript | 5173 | Frontend with a live backend switcher |
 
 ```mermaid
 flowchart LR
@@ -285,7 +285,7 @@ cd ../pokedex-api-express-ts
 npm run db:migrate
 ```
 
-If the schema ever changes, the change is made in the TS repo's `Schema.ts`, migrated from there, and then ported verbatim into this repo's `Schema.js` (the file's header comment restates this rule). The previous iteration's change — adding `collection_entries` and back-filling every pre-existing `pokemons` row to the oldest user account via an inserted `collection_entries` row (`CROSS JOIN` against `users ORDER BY created_at ASC LIMIT 1`) — landed as [`drizzle/0001_polite_violations.sql`](../pokedex-api-express-ts/drizzle/0001_polite_violations.sql). This iteration's — the three economy tables plus a hand-written, idempotent backfill that grandfathers every *existing* account into the economy with the same starting kit a new registration receives (10000 credits and 10 Poké Balls, `ON CONFLICT DO NOTHING` so a re-run is a no-op; captured collection entries are left untouched) — landed as [`drizzle/0002_absurd_black_bird.sql`](../pokedex-api-express-ts/drizzle/0002_absurd_black_bird.sql). This repo only ever received the ported `Schema.js` changes, never the migrations themselves.
+If the schema ever changes, the change is made in the TS repo's `Schema.ts`, migrated from there, and then ported verbatim into this repo's `Schema.js` (the file's header comment restates this rule). The previous iteration's change — adding `collection_entries` and back-filling every pre-existing `pokemons` row to the oldest user account via an inserted `collection_entries` row (`CROSS JOIN` against `users ORDER BY created_at ASC LIMIT 1`) — landed as [`drizzle/0001_polite_violations.sql`](https://github.com/jorius/pokedex-api-express-ts/blob/main/drizzle/0001_polite_violations.sql). This iteration's — the three economy tables plus a hand-written, idempotent backfill that grandfathers every *existing* account into the economy with the same starting kit a new registration receives (10000 credits and 10 Poké Balls, `ON CONFLICT DO NOTHING` so a re-run is a no-op; captured collection entries are left untouched) — landed as [`drizzle/0002_absurd_black_bird.sql`](https://github.com/jorius/pokedex-api-express-ts/blob/main/drizzle/0002_absurd_black_bird.sql). This repo only ever received the ported `Schema.js` changes, never the migrations themselves.
 
 ## Running
 
@@ -514,8 +514,8 @@ npm run lint       # ESLint — airbnb-base
 
 ## Ecosystem siblings
 
-- [`../pokedex-api-express-ts`](../pokedex-api-express-ts) — TypeScript reference implementation, schema + infra owner (port 3001)
-- [`../pokedex-api-dotnet`](../pokedex-api-dotnet) — ASP.NET Core sibling (port 5257)
-- [`../pokedex-web`](../pokedex-web) — React frontend (port 5173)
+- [`pokedex-api-express-ts`](https://github.com/jorius/pokedex-api-express-ts) — TypeScript reference implementation, schema + infra owner (port 3001)
+- [`pokedex-api-dotnet`](https://github.com/jorius/pokedex-api-dotnet) — ASP.NET Core sibling (port 5257)
+- [`pokedex-web`](https://github.com/jorius/pokedex-web) — React frontend (port 5173)
 
-Design charter: [`../pokedex-api-express-ts/docs/superpowers/specs/2026-08-14-pokedex-ecosystem-design.md`](../pokedex-api-express-ts/docs/superpowers/specs/2026-08-14-pokedex-ecosystem-design.md).
+Design charter: [`../pokedex-api-express-ts/docs/superpowers/specs/2026-08-14-pokedex-ecosystem-design.md`](https://github.com/jorius/pokedex-api-express-ts/blob/main/docs/superpowers/specs/2026-08-14-pokedex-ecosystem-design.md).
